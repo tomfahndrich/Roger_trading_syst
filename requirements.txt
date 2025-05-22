@@ -1,0 +1,6 @@
+pandas
+numpy
+ta
+alpha_vantage
+openpyxl
+scipy
