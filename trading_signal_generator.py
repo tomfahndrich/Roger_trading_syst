@@ -50,8 +50,8 @@ def signal_from_indicators(df):
     slope_k = slope(df['K'])
     slope_d = slope(df['D'])
 
-    buy  = (k_now > d_now) and (cci_now > 100)  # and (slope_k > 0) and (slope_d > 0)
-    sell = (k_now < d_now) and (cci_now < -100) # and (slope_k < 0) and (slope_d < 0)
+    buy  = (k_now > d_now) and (cci_now < -100)  and (slope_k > 0.1) and (slope_d > 0)
+    sell = (k_now < d_now) and (cci_now > 100) # and (slope_k < 0) and (slope_d < 0)
 
     return 'Buy' if buy else 'Sell' if sell else 'Neutral'
 
@@ -108,12 +108,15 @@ def main():
             })
 
     # Load or initialize Excel
+    # Add/Preserve 'notes' column after 'signal'
+    NOTES_COL = 'notes'
+
     if os.path.exists(EXCEL_FILE):
         existing = pd.read_excel(EXCEL_FILE, sheet_name=None)
     else:
         existing = {
             sheet: pd.DataFrame(columns=[
-                'datetime','signal','token','close price','CCI',
+                'datetime','signal',NOTES_COL,'token','close price','CCI',
                 'stoch K','stoch D','slope K','slope D'
             ]) for sheet in TIMEFRAMES
         }
@@ -122,11 +125,40 @@ def main():
         for sheet in TIMEFRAMES:
             old_df = existing.get(sheet, pd.DataFrame())
             new_df = pd.DataFrame(new_signals[sheet])
-            combined = pd.concat([new_df, old_df], ignore_index=True) if not new_df.empty else old_df
+
+            # Ensure 'notes' column exists as the last column
+            if NOTES_COL not in old_df.columns:
+                old_df[NOTES_COL] = ""
+
+            if not new_df.empty:
+                # Add empty 'notes' column as the last column
+                if NOTES_COL not in new_df.columns:
+                    new_df[NOTES_COL] = ""
+
+                # Merge: preserve notes for matching (datetime, token, signal)
+                merge_keys = ['datetime', 'token', 'signal']
+                combined = pd.merge(
+                    new_df, old_df[[*merge_keys, NOTES_COL]],
+                    on=merge_keys, how='left'
+                )
+                # If there are notes in old_df, use them; else keep empty
+                combined[NOTES_COL] = combined[NOTES_COL + '_y'].combine_first(combined[NOTES_COL + '_x'])
+                combined = combined.drop(columns=[NOTES_COL + '_x', NOTES_COL + '_y'])
+                # Append any old rows not in new_df
+                old_extra = old_df[~old_df.set_index(merge_keys).index.isin(new_df.set_index(merge_keys).index)]
+                combined = pd.concat([combined, old_extra], ignore_index=True)
+            else:
+                combined = old_df
 
             # —— ROUND NUMERIC COLUMNS TO 2 DECIMALS ————————————————
             num_cols = ['close price','CCI','stoch K','stoch D','slope K','slope D']
-            combined[num_cols] = combined[num_cols].round(2)
+            for col in num_cols:
+                if col in combined.columns:
+                    combined[col] = combined[col].round(2)
+
+            # Ensure 'notes' is the last column
+            cols = [col for col in combined.columns if col != NOTES_COL] + [NOTES_COL]
+            combined = combined.reindex(columns=cols)
 
             combined.to_excel(writer, sheet_name=sheet, index=False)
 
