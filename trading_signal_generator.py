@@ -50,7 +50,7 @@ def signal_from_indicators(df):
     slope_k = slope(df['K'])
     slope_d = slope(df['D'])
 
-    buy  = (k_now > d_now) and (cci_now < -100)  and (slope_k > 0.1) and (slope_d > 0)
+    buy  = (k_now > d_now) and (cci_now < -100)  # and (slope_k > 0.1) and (slope_d > 0)
     sell = (k_now < d_now) and (cci_now > 100) # and (slope_k < 0) and (slope_d < 0)
 
     return 'Buy' if buy else 'Sell' if sell else 'Neutral'
