@@ -5,7 +5,6 @@ import yfinance as yf
 from ta.trend import SMAIndicator, CCIIndicator
 
 # PARAMETERS
-TOKENS_FILE = 'tokens.txt'
 EXCEL_FILE  = 'trading_synthesis.xlsx'
 TIMEFRAMES  = {
     'weekly': {'interval': '1wk',  'period': '3y'},
@@ -56,9 +55,10 @@ def signal_from_indicators(df):
     return 'Buy' if buy else 'Sell' if sell else 'Neutral'
 
 def main():
-    # Load tokens
-    with open(TOKENS_FILE) as f:
-        tokens = [t.strip() for t in f if t.strip()]
+    # Load tokens from "symbols" sheet in Excel
+    symbols_df = pd.read_excel(EXCEL_FILE, sheet_name="symbols")
+    # Extract the 'Symbols' column, dropna to ignore empty cells, and convert to string
+    tokens = symbols_df["Symbols"].dropna().astype(str).tolist()
 
     new_signals = {tf: [] for tf in TIMEFRAMES}
 
@@ -121,46 +121,52 @@ def main():
             ]) for sheet in TIMEFRAMES
         }
 
+    # Preserve all sheets, only update the ones in TIMEFRAMES
+    all_sheets = existing.copy()
+    for sheet in TIMEFRAMES:
+        old_df = existing.get(sheet, pd.DataFrame())
+        new_df = pd.DataFrame(new_signals[sheet])
+
+        # Ensure 'notes' column exists as the last column
+        if NOTES_COL not in old_df.columns:
+            old_df[NOTES_COL] = ""
+
+        if not new_df.empty:
+            # Add empty 'notes' column as the last column
+            if NOTES_COL not in new_df.columns:
+                new_df[NOTES_COL] = ""
+
+            # Merge: preserve notes for matching (datetime, token, signal)
+            merge_keys = ['datetime', 'token', 'signal']
+            combined = pd.merge(
+                new_df, old_df[[*merge_keys, NOTES_COL]],
+                on=merge_keys, how='left'
+            )
+            # If there are notes in old_df, use them; else keep empty
+            combined[NOTES_COL] = combined[NOTES_COL + '_y'].combine_first(combined[NOTES_COL + '_x'])
+            combined = combined.drop(columns=[NOTES_COL + '_x', NOTES_COL + '_y'])
+            # Append any old rows not in new_df
+            old_extra = old_df[~old_df.set_index(merge_keys).index.isin(new_df.set_index(merge_keys).index)]
+            combined = pd.concat([combined, old_extra], ignore_index=True)
+        else:
+            combined = old_df
+
+        # —— ROUND NUMERIC COLUMNS TO 2 DECIMALS ————————————————
+        num_cols = ['close price','CCI','stoch K','stoch D','slope K','slope D']
+        for col in num_cols:
+            if col in combined.columns:
+                combined[col] = combined[col].round(2)
+
+        # Ensure 'notes' is the last column
+        cols = [col for col in combined.columns if col != NOTES_COL] + [NOTES_COL]
+        combined = combined.reindex(columns=cols)
+
+        all_sheets[sheet] = combined
+
+    # Write all sheets back, preserving "symbols" and any others
     with pd.ExcelWriter(EXCEL_FILE, engine='openpyxl') as writer:
-        for sheet in TIMEFRAMES:
-            old_df = existing.get(sheet, pd.DataFrame())
-            new_df = pd.DataFrame(new_signals[sheet])
-
-            # Ensure 'notes' column exists as the last column
-            if NOTES_COL not in old_df.columns:
-                old_df[NOTES_COL] = ""
-
-            if not new_df.empty:
-                # Add empty 'notes' column as the last column
-                if NOTES_COL not in new_df.columns:
-                    new_df[NOTES_COL] = ""
-
-                # Merge: preserve notes for matching (datetime, token, signal)
-                merge_keys = ['datetime', 'token', 'signal']
-                combined = pd.merge(
-                    new_df, old_df[[*merge_keys, NOTES_COL]],
-                    on=merge_keys, how='left'
-                )
-                # If there are notes in old_df, use them; else keep empty
-                combined[NOTES_COL] = combined[NOTES_COL + '_y'].combine_first(combined[NOTES_COL + '_x'])
-                combined = combined.drop(columns=[NOTES_COL + '_x', NOTES_COL + '_y'])
-                # Append any old rows not in new_df
-                old_extra = old_df[~old_df.set_index(merge_keys).index.isin(new_df.set_index(merge_keys).index)]
-                combined = pd.concat([combined, old_extra], ignore_index=True)
-            else:
-                combined = old_df
-
-            # —— ROUND NUMERIC COLUMNS TO 2 DECIMALS ————————————————
-            num_cols = ['close price','CCI','stoch K','stoch D','slope K','slope D']
-            for col in num_cols:
-                if col in combined.columns:
-                    combined[col] = combined[col].round(2)
-
-            # Ensure 'notes' is the last column
-            cols = [col for col in combined.columns if col != NOTES_COL] + [NOTES_COL]
-            combined = combined.reindex(columns=cols)
-
-            combined.to_excel(writer, sheet_name=sheet, index=False)
+        for sheet_name, df in all_sheets.items():
+            df.to_excel(writer, sheet_name=sheet_name, index=False)
 
     print(f"Updated '{EXCEL_FILE}' with 2-dec Buy/Sell signals for: {', '.join(tokens)}")
 

@@ -1,6 +1,2 @@
-# Ignore Excel files
-trading_synthesis.xlsx
-~$trading_synthesis.xlsx
-
 # Ignore script file
 update_watchlist.py
