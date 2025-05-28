@@ -65,7 +65,11 @@ def main():
     for token in tokens:
         ticker = yf.Ticker(token)
         for sheet, cfg in TIMEFRAMES.items():
-            df = ticker.history(period=cfg['period'], interval=cfg['interval'])
+            try:
+                df = ticker.history(period=cfg['period'], interval=cfg['interval'])
+            except Exception as e:
+                print(f"Error fetching data for {token} ({sheet}): {e}")
+                continue
             if df.empty:
                 print(f"Warning: No data for {token} ({sheet})")
                 continue
