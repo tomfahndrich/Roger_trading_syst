@@ -4,3 +4,4 @@ ta
 alpha_vantage
 openpyxl
 scipy
+yfinance
