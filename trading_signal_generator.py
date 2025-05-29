@@ -7,6 +7,7 @@ from ta.trend import SMAIndicator, CCIIndicator
 # PARAMETERS
 EXCEL_FILE  = 'trading_synthesis.xlsx'
 TIMEFRAMES  = {
+    'monthly': {'interval': '1mo', 'period': '13y'},
     'weekly': {'interval': '1wk',  'period': '3y'},
     'daily' : {'interval': '1d',   'period': '1y'},
     '4h'    : {'interval': '4h',   'period': '90d'},  # ← changed here
