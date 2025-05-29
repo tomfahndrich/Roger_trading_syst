@@ -171,6 +171,25 @@ class TradingApp:
         sell_btn.pack(side=tk.LEFT, padx=2)
         ToolTip(sell_btn, "Show only Sell signals")
         
+        # Add token search field
+        token_search_frame = tk.Frame(filter_frame, bg="#DCDAD5")
+        token_search_frame.pack(side=tk.LEFT, padx=10)
+        
+        token_label = tk.Label(token_search_frame, text="Token:", bg="#DCDAD5", fg="black", font=("Arial", 11))
+        token_label.pack(side=tk.LEFT, padx=2)
+        
+        self.token_var = tk.StringVar()
+        self.token_var.trace_add("write", lambda name, index, mode, sv=self.token_var: self.filter_by_token(sv.get()))
+        token_entry = tk.Entry(token_search_frame, textvariable=self.token_var, width=10, 
+                              bg="white", fg="black")
+        token_entry.pack(side=tk.LEFT, padx=2)
+        
+        clear_btn = tk.Button(token_search_frame, text="✕", command=lambda: self.clear_token_filter(), 
+                             bg="#DCDAD5", width=2, cursor="hand2",
+                             relief=tk.FLAT, borderwidth=0, highlightthickness=0)
+        clear_btn.pack(side=tk.LEFT, padx=1)
+        ToolTip(clear_btn, "Clear token filter")
+        
         # Add info label with icon
         info_frame = tk.Frame(button_frame, bg="#f0f0f0")
         info_frame.pack(side=tk.RIGHT, padx=10)
@@ -530,7 +549,41 @@ class TradingApp:
         self.data[sheet] = current_data_for_sheet # Restore original
 
         self.status_var.set(f"Displaying {signal_type.capitalize()} signals for {sheet.capitalize()}")
+    
+    def filter_by_token(self, token_text):
+        """Filter data based on token name (case-insensitive partial match)"""
+        if not token_text:
+            # If token filter is empty, show all data
+            self.filter_signals("all")
+            return
+            
+        current_tab_id = self.notebook.select()
+        if not current_tab_id:
+            return
+        sheet = self.notebook.tab(current_tab_id, "text").lower()
+        
+        # Use a temporary DataFrame for display to keep self.data intact
+        if sheet not in self.data or not isinstance(self.data[sheet], pd.DataFrame):
+            return # Should not happen
+        
+        df_full = self.data[sheet].copy()
+        
+        # Filter by token name (case-insensitive partial match)
+        df_to_display = df_full[df_full['token'].astype(str).str.lower().str.contains(token_text.lower())]
+        
+        # Create a temporary display DataFrame to pass to display_data
+        current_data_for_sheet = self.data[sheet] # Backup
+        self.data[sheet] = df_to_display # Temporarily set for display
+        self.display_data(sheet) # This will use the filtered df_to_display
+        self.data[sheet] = current_data_for_sheet # Restore original
 
+        self.status_var.set(f"Displaying tokens matching '{token_text}' for {sheet.capitalize()}")
+    
+    def clear_token_filter(self):
+        """Clear token filter and show all data"""
+        self.token_var.set("")
+        self.filter_signals("all")
+        
     def export_to_excel(self):
         """Export current data (all sheets from self.data) to a new Excel file."""
         try:
