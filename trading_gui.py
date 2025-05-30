@@ -4,6 +4,12 @@ from tkinter import ttk, messagebox, filedialog
 import pandas as pd
 from trading_signal_generator import main as generate_signals, TIMEFRAMES, EXCEL_FILE
 
+# Define constants for column names, mirroring trading_signal_generator.py
+# BASE_COLS from trading_signal_generator.py: ['datetime', 'signal', 'token', 'close price', 'CCI', 'stoch K', 'stoch D', 'slope K', 'slope D']
+# NOTES_COL from trading_signal_generator.py: 'notes'
+BASE_COLS_GUI = ['datetime', 'signal', 'token', 'close price', 'CCI', 'stoch K', 'stoch D', 'slope K', 'slope D']
+NOTES_COL_GUI = 'notes'
+
 # Create a tooltip class for better UI
 class ToolTip:
     def __init__(self, widget, text):
@@ -37,18 +43,16 @@ class ToolTip:
 COLUMN_WIDTHS = {
     'datetime': 150,
     'signal': 60,
-    'notes': 200,
+    NOTES_COL_GUI: 200, # Use constant
     'token': 80,
     'close price': 100,
     'CCI': 80,
     'stoch K': 80,
     'stoch D': 80,
     'slope K': 80,
-    'slope D': 80
+    'slope D': 80,
+    # Trend columns will be added dynamically, default width can be set or handled in display_data
 }
-
-# Define standard columns for DataFrames to ensure consistency
-STANDARD_COLUMNS = ['datetime', 'signal', 'token', 'close price', 'CCI', 'stoch K', 'stoch D', 'slope K', 'slope D', 'notes']
 
 class TradingApp:
     def __init__(self, root):
@@ -65,14 +69,18 @@ class TradingApp:
         style.configure("Treeview", font=('Arial', 10))
         style.configure("Treeview.Heading", font=('Arial', 11, 'bold'))
         
-        # Initialize data dictionary with empty DataFrames structured with STANDARD_COLUMNS
+        # Initialize data dictionary with empty DataFrames structured dynamically
         self.data = {}
         for sheet in TIMEFRAMES:
-            df = pd.DataFrame(columns=STANDARD_COLUMNS)
-            if 'notes' in df.columns:
-                df['notes'] = df['notes'].astype(str)
-            else: # Should not happen if STANDARD_COLUMNS includes 'notes'
-                df['notes'] = pd.Series(dtype=str)
+            other_timeframes = [tf for tf in TIMEFRAMES if tf != sheet]
+            trend_cols_for_this_sheet = sorted([f'{tf}_trend' for tf in other_timeframes])
+            current_sheet_columns = BASE_COLS_GUI[:2] + [NOTES_COL_GUI] + BASE_COLS_GUI[2:] + trend_cols_for_this_sheet
+            
+            df = pd.DataFrame(columns=current_sheet_columns)
+            if NOTES_COL_GUI in df.columns:
+                df[NOTES_COL_GUI] = df[NOTES_COL_GUI].astype(str)
+            else: # Should not happen if current_sheet_columns includes NOTES_COL_GUI
+                df[NOTES_COL_GUI] = pd.Series(dtype=str)
             self.data[sheet] = df
             
         # Create menu
@@ -229,9 +237,6 @@ class TradingApp:
             hsb.pack(side=tk.BOTTOM, fill=tk.X)
             tree.pack(fill=tk.BOTH, expand=True)
             
-            # Configure tree columns - initially empty
-            tree["columns"] = STANDARD_COLUMNS
-            
             # Configure tags for Buy/Sell colors
             tree.tag_configure('buy', background='#c8e6c9')   # Light green
             tree.tag_configure('sell', background='#ffcdd2')  # Light red
@@ -250,96 +255,118 @@ class TradingApp:
         try:
             # Initialize self.data with empty, correctly structured DataFrames first
             for sheet in TIMEFRAMES:
-                df = pd.DataFrame(columns=STANDARD_COLUMNS)
-                df['notes'] = df['notes'].astype(str)
+                other_timeframes = [tf for tf in TIMEFRAMES if tf != sheet]
+                trend_cols_for_this_sheet = sorted([f'{tf}_trend' for tf in other_timeframes])
+                current_sheet_columns = BASE_COLS_GUI[:2] + [NOTES_COL_GUI] + BASE_COLS_GUI[2:] + trend_cols_for_this_sheet
+                df = pd.DataFrame(columns=current_sheet_columns)
+                df[NOTES_COL_GUI] = df[NOTES_COL_GUI].astype(str) # Ensure notes column is string
                 self.data[sheet] = df
 
             if os.path.exists(EXCEL_FILE):
                 self.status_var.set("Loading data from Excel...")
                 excel_data_sheets = pd.read_excel(EXCEL_FILE, sheet_name=None)
                 
-                for sheet in TIMEFRAMES:
-                    if sheet in excel_data_sheets:
-                        loaded_df = excel_data_sheets[sheet].copy()
-                        # Ensure all standard columns exist, add if missing
-                        for col in STANDARD_COLUMNS:
-                            if col not in loaded_df.columns:
-                                loaded_df[col] = "" if col == 'notes' else pd.NA
+                for sheet_name_from_excel, df_from_excel in excel_data_sheets.items():
+                    if sheet_name_from_excel in TIMEFRAMES: # Process only sheets defined in TIMEFRAMES
+                        # Determine expected columns for this sheet
+                        other_timeframes = [tf for tf in TIMEFRAMES if tf != sheet_name_from_excel]
+                        trend_cols_for_this_sheet = sorted([f'{tf}_trend' for tf in other_timeframes])
+                        expected_cols = BASE_COLS_GUI[:2] + [NOTES_COL_GUI] + BASE_COLS_GUI[2:] + trend_cols_for_this_sheet
                         
-                        loaded_df['notes'] = loaded_df['notes'].fillna("").astype(str)
-                        # Ensure all STANDARD_COLUMNS are present before assignment
-                        self.data[sheet] = loaded_df.reindex(columns=STANDARD_COLUMNS, fill_value="") 
-                        self.data[sheet]['notes'] = self.data[sheet]['notes'].fillna("").astype(str)
+                        # Create a new DataFrame with expected columns
+                        df_structured = pd.DataFrame(columns=expected_cols)
+                        
+                        # Fill with data from Excel, aligning columns
+                        for col in expected_cols:
+                            if col in df_from_excel.columns:
+                                df_structured[col] = df_from_excel[col]
+                            else:
+                                df_structured[col] = pd.NA # Or some default like "" or np.nan
+                        
+                        if NOTES_COL_GUI in df_structured.columns:
+                            df_structured[NOTES_COL_GUI] = df_structured[NOTES_COL_GUI].fillna("").astype(str)
+                        else:
+                            df_structured[NOTES_COL_GUI] = ""
+                            
+                        self.data[sheet_name_from_excel] = df_structured
             else:
-                messagebox.showwarning("File Not Found", f"Excel file not found at {EXCEL_FILE}. Displaying empty tables.")
+                messagebox.showinfo("Info", f"{EXCEL_FILE} not found. Displaying empty tables.")
+                self.status_var.set(f"{EXCEL_FILE} not found.")
+                # self.data is already initialized with empty structured DataFrames
 
             self.display_all_data() # Helper to refresh all tabs
-            self.status_var.set("Data loaded successfully from Excel")
+            self.status_var.set("Data loaded successfully")
             
         except Exception as e:
-            messagebox.showerror("Error", f"Error loading data from Excel: {str(e)}")
+            messagebox.showerror("Error", f"Error loading data: {str(e)}")
             self.status_var.set(f"Error loading data: {str(e)}")
             # Fallback: ensure self.data has empty, structured DataFrames
             for sheet in TIMEFRAMES:
-                df = pd.DataFrame(columns=STANDARD_COLUMNS)
-                df['notes'] = df['notes'].astype(str)
+                other_timeframes = [tf for tf in TIMEFRAMES if tf != sheet]
+                trend_cols_for_this_sheet = sorted([f'{tf}_trend' for tf in other_timeframes])
+                current_sheet_columns = BASE_COLS_GUI[:2] + [NOTES_COL_GUI] + BASE_COLS_GUI[2:] + trend_cols_for_this_sheet
+                df = pd.DataFrame(columns=current_sheet_columns)
+                df[NOTES_COL_GUI] = df[NOTES_COL_GUI].astype(str)
                 self.data[sheet] = df
             self.display_all_data()
 
     def display_all_data(self):
         """Helper function to refresh display for all sheets."""
         for sheet in TIMEFRAMES:
-            self.display_data(sheet)
+            self.display_data(sheet) # Pass the sheet name (key)
 
-    def display_data(self, sheet):
+    def display_data(self, sheet_key):
         """Display data in the treeview for a specific sheet"""
-        tree = self.trees[sheet]
-        df_display = pd.DataFrame(columns=STANDARD_COLUMNS)
-        if sheet in self.data and isinstance(self.data[sheet], pd.DataFrame):
-            df_display = self.data[sheet].copy()
+        tree = self.trees[sheet_key]
         
-        for col in STANDARD_COLUMNS: # Ensure all standard columns exist in df_display
-            if col not in df_display.columns:
-                df_display[col] = "" if col == 'notes' else pd.NA
-        df_display['notes'] = df_display['notes'].fillna("").astype(str)
+        # Determine the columns for this specific sheet
+        other_timeframes = [tf for tf in TIMEFRAMES if tf != sheet_key]
+        trend_cols_for_this_sheet = sorted([f'{tf}_trend' for tf in other_timeframes])
+        current_sheet_columns = BASE_COLS_GUI[:2] + [NOTES_COL_GUI] + BASE_COLS_GUI[2:] + trend_cols_for_this_sheet
+
+        df_display = pd.DataFrame(columns=current_sheet_columns)
+        if sheet_key in self.data and isinstance(self.data[sheet_key], pd.DataFrame):
+            # Ensure the DataFrame being displayed has all the necessary columns in the correct order
+            temp_df = self.data[sheet_key].copy()
+            for col in current_sheet_columns:
+                if col not in temp_df.columns:
+                    temp_df[col] = "" # Add missing columns with empty string
+            df_display = temp_df.reindex(columns=current_sheet_columns).fillna("")
+        
+        if NOTES_COL_GUI in df_display.columns:
+            df_display[NOTES_COL_GUI] = df_display[NOTES_COL_GUI].fillna("").astype(str)
+        else: # Should not be needed if columns are set up correctly
+            df_display[NOTES_COL_GUI] = ""
 
         # Clear previous data
         for item in tree.get_children():
             tree.delete(item)
         
-        # Configure columns from STANDARD_COLUMNS for consistency
-        tree["columns"] = STANDARD_COLUMNS
-        tree.column("#0", width=0, stretch=tk.NO)
-        tree.heading("#0", text="")
+        # Configure tree columns dynamically
+        tree["columns"] = current_sheet_columns
+        tree["show"] = "headings"  # Show only headings, not the default first column
+
+        for col in current_sheet_columns:
+            col_width = COLUMN_WIDTHS.get(col, 80) # Default width for new trend columns
+            if col.endswith('_trend'): # Specific width for trend columns if desired
+                col_width = 70 
+            tree.heading(col, text=col.replace('_', ' ').title())
+            tree.column(col, width=col_width, anchor=tk.W)
         
-        for col in STANDARD_COLUMNS:
-            width = COLUMN_WIDTHS.get(col, 100)
-            tree.column(col, width=width, anchor=tk.W if col == 'notes' else tk.CENTER) # Notes left-aligned
-            tree.heading(col, text=col.capitalize())
-        
-        # Add data rows
-        if not df_display.empty:
-            for idx, row_s in df_display.iterrows(): # row_s is a Series
-                values = []
-                for col_name in STANDARD_COLUMNS:
-                    val = row_s.get(col_name, "") # Get value or default to empty string
-                    if pd.api.types.is_datetime64_any_dtype(val) or isinstance(val, pd.Timestamp):
-                        values.append(val.strftime('%Y-%m-%d %H:%M:%S'))
-                    elif pd.isna(val):
-                        values.append("") # Display NA as empty string
-                    else:
-                        values.append(str(val)) # Ensure all values are strings for treeview
-                
-                tag = ""
-                signal_val_series = row_s.get('signal', pd.Series(dtype=str)) # Get as series
-                if not pd.isna(signal_val_series):
-                    signal_val = str(signal_val_series).lower()
-                    if signal_val == 'buy':
-                        tag = "buy"
-                    elif signal_val == 'sell':
-                        tag = "sell"
-                tree.insert("", tk.END, values=tuple(values), tags=(tag,))
-    
+        # Insert data
+        for index, row in df_display.iterrows():
+            values = [row[col] for col in current_sheet_columns]
+            tags = ()
+            if 'signal' in df_display.columns:
+                if row['signal'] == 'Buy':
+                    tags = ('buy',)
+                elif row['signal'] == 'Sell':
+                    tags = ('sell',)
+            tree.insert("", tk.END, values=values, tags=tags)
+
+        # Update status bar or other UI elements if needed
+        self.status_var.set(f"Displaying data for {sheet_key.capitalize()}")
+
     def save_data_to_excel(self): # Renamed for clarity, this is the main save mechanism
         """Save all data from self.data to the Excel file, preserving other sheets like 'symbols'."""
         try:
@@ -362,21 +389,21 @@ class TradingApp:
                     df_to_save = self.data.get(sheet_name_app)
                     
                     if df_to_save is None or not isinstance(df_to_save, pd.DataFrame):
-                        df_to_save = pd.DataFrame(columns=STANDARD_COLUMNS)
+                        df_to_save = pd.DataFrame(columns=BASE_COLS_GUI)
                     else:
                         df_to_save = df_to_save.copy()
 
                     # Ensure all standard columns exist.
-                    for col in STANDARD_COLUMNS:
+                    for col in BASE_COLS_GUI:
                         if col not in df_to_save.columns:
                             if col == 'notes':
                                 df_to_save[col] = "" 
                             else:
                                 df_to_save[col] = pd.NA
                     
-                    df_to_save['notes'] = df_to_save['notes'].fillna("").astype(str)
+                    df_to_save[NOTES_COL_GUI] = df_to_save[NOTES_COL_GUI].fillna("").astype(str)
                     
-                    df_final = df_to_save.reindex(columns=STANDARD_COLUMNS)
+                    df_final = df_to_save.reindex(columns=BASE_COLS_GUI)
                     
                     for col in df_final.columns:
                         if col != 'notes':
@@ -441,7 +468,7 @@ class TradingApp:
             column_idx = int(column_id.replace('#', '')) -1 # Treeview columns are 1-indexed
 
             # Ensure we are clicking on the 'notes' column
-            if column_idx < 0 or column_idx >= len(STANDARD_COLUMNS) or STANDARD_COLUMNS[column_idx] != 'notes':
+            if column_idx < 0 or column_idx >= len(BASE_COLS_GUI) or BASE_COLS_GUI[column_idx] != 'notes':
                 return
         except Exception: # Catch any error during identification (e.g. if click is not on a cell)
             return
@@ -464,12 +491,12 @@ class TradingApp:
             # Update DataFrame (self.data)
             # We need a reliable way to find the row in the DataFrame.
             # Using the tree item's current values for datetime, token, signal as a key.
-            # This assumes these columns are present and their order in STANDARD_COLUMNS.
+            # This assumes these columns are present and their order in BASE_COLS_GUI.
             
             try:
-                dt_idx = STANDARD_COLUMNS.index('datetime')
-                tk_idx = STANDARD_COLUMNS.index('token')
-                sg_idx = STANDARD_COLUMNS.index('signal')
+                dt_idx = BASE_COLS_GUI.index('datetime')
+                tk_idx = BASE_COLS_GUI.index('token')
+                sg_idx = BASE_COLS_GUI.index('signal')
             except ValueError:
                 messagebox.showerror("Error", "Key columns (datetime, token, signal) not found for saving note.")
                 entry.destroy()
@@ -601,13 +628,13 @@ class TradingApp:
                         df_to_export = df_app.copy()
                         
                         # Ensure all standard columns exist and notes are properly formatted
-                        for col in STANDARD_COLUMNS:
+                        for col in BASE_COLS_GUI:
                             if col not in df_to_export.columns:
                                 df_to_export[col] = "" if col == 'notes' else pd.NA
                         
                         df_to_export['notes'] = df_to_export['notes'].fillna("").astype(str)
 
-                        final_export_df = df_to_export.reindex(columns=STANDARD_COLUMNS, fill_value="")
+                        final_export_df = df_to_export.reindex(columns=BASE_COLS_GUI, fill_value="")
                         final_export_df['notes'] = final_export_df['notes'].fillna("").astype(str)
 
                         final_export_df.to_excel(writer, sheet_name=sheet_name, index=False)
