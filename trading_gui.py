@@ -74,7 +74,7 @@ class TradingApp:
         for sheet in TIMEFRAMES:
             other_timeframes = [tf for tf in TIMEFRAMES if tf != sheet]
             trend_cols_for_this_sheet = sorted([f'{tf}_trend' for tf in other_timeframes])
-            current_sheet_columns = BASE_COLS_GUI[:2] + [NOTES_COL_GUI] + BASE_COLS_GUI[2:] + trend_cols_for_this_sheet
+            current_sheet_columns = BASE_COLS_GUI + trend_cols_for_this_sheet + [NOTES_COL_GUI]
             
             df = pd.DataFrame(columns=current_sheet_columns)
             if NOTES_COL_GUI in df.columns:
@@ -257,7 +257,7 @@ class TradingApp:
             for sheet in TIMEFRAMES:
                 other_timeframes = [tf for tf in TIMEFRAMES if tf != sheet]
                 trend_cols_for_this_sheet = sorted([f'{tf}_trend' for tf in other_timeframes])
-                current_sheet_columns = BASE_COLS_GUI[:2] + [NOTES_COL_GUI] + BASE_COLS_GUI[2:] + trend_cols_for_this_sheet
+                current_sheet_columns = BASE_COLS_GUI + trend_cols_for_this_sheet + [NOTES_COL_GUI]
                 df = pd.DataFrame(columns=current_sheet_columns)
                 df[NOTES_COL_GUI] = df[NOTES_COL_GUI].astype(str) # Ensure notes column is string
                 self.data[sheet] = df
@@ -271,7 +271,7 @@ class TradingApp:
                         # Determine expected columns for this sheet
                         other_timeframes = [tf for tf in TIMEFRAMES if tf != sheet_name_from_excel]
                         trend_cols_for_this_sheet = sorted([f'{tf}_trend' for tf in other_timeframes])
-                        expected_cols = BASE_COLS_GUI[:2] + [NOTES_COL_GUI] + BASE_COLS_GUI[2:] + trend_cols_for_this_sheet
+                        expected_cols = BASE_COLS_GUI + trend_cols_for_this_sheet + [NOTES_COL_GUI]
                         
                         # Create a new DataFrame with expected columns
                         df_structured = pd.DataFrame(columns=expected_cols)
@@ -304,7 +304,7 @@ class TradingApp:
             for sheet in TIMEFRAMES:
                 other_timeframes = [tf for tf in TIMEFRAMES if tf != sheet]
                 trend_cols_for_this_sheet = sorted([f'{tf}_trend' for tf in other_timeframes])
-                current_sheet_columns = BASE_COLS_GUI[:2] + [NOTES_COL_GUI] + BASE_COLS_GUI[2:] + trend_cols_for_this_sheet
+                current_sheet_columns = BASE_COLS_GUI + trend_cols_for_this_sheet + [NOTES_COL_GUI]
                 df = pd.DataFrame(columns=current_sheet_columns)
                 df[NOTES_COL_GUI] = df[NOTES_COL_GUI].astype(str)
                 self.data[sheet] = df
@@ -322,21 +322,20 @@ class TradingApp:
         # Determine the columns for this specific sheet
         other_timeframes = [tf for tf in TIMEFRAMES if tf != sheet_key]
         trend_cols_for_this_sheet = sorted([f'{tf}_trend' for tf in other_timeframes])
-        current_sheet_columns = BASE_COLS_GUI[:2] + [NOTES_COL_GUI] + BASE_COLS_GUI[2:] + trend_cols_for_this_sheet
+        current_sheet_columns = BASE_COLS_GUI + trend_cols_for_this_sheet + [NOTES_COL_GUI]
 
         df_display = pd.DataFrame(columns=current_sheet_columns)
         if sheet_key in self.data and isinstance(self.data[sheet_key], pd.DataFrame):
-            # Ensure the DataFrame being displayed has all the necessary columns in the correct order
-            temp_df = self.data[sheet_key].copy()
+            df_from_data = self.data[sheet_key].copy()
             for col in current_sheet_columns:
-                if col not in temp_df.columns:
-                    temp_df[col] = "" # Add missing columns with empty string
-            df_display = temp_df.reindex(columns=current_sheet_columns).fillna("")
+                if col not in df_from_data.columns:
+                    df_from_data[col] = ""
+            df_display = df_from_data.reindex(columns=current_sheet_columns, fill_value="")
         
         if NOTES_COL_GUI in df_display.columns:
             df_display[NOTES_COL_GUI] = df_display[NOTES_COL_GUI].fillna("").astype(str)
-        else: # Should not be needed if columns are set up correctly
-            df_display[NOTES_COL_GUI] = ""
+        else:
+            df_display[NOTES_COL_GUI] = ""          
 
         # Clear previous data
         for item in tree.get_children():
@@ -347,22 +346,24 @@ class TradingApp:
         tree["show"] = "headings"  # Show only headings, not the default first column
 
         for col in current_sheet_columns:
-            col_width = COLUMN_WIDTHS.get(col, 80) # Default width for new trend columns
-            if col.endswith('_trend'): # Specific width for trend columns if desired
-                col_width = 70 
             tree.heading(col, text=col.replace('_', ' ').title())
-            tree.column(col, width=col_width, anchor=tk.W)
+            # MODIFIED: anchor=tk.CENTER to center text in columns
+            tree.column(col, width=getattr(self, 'column_widths', {}).get(col, 100), anchor=tk.CENTER) 
         
         # Insert data
         for index, row in df_display.iterrows():
-            values = [row[col] for col in current_sheet_columns]
+            values_to_insert = [str(row[col]) if pd.notna(row[col]) else "" for col in current_sheet_columns]
+            
+            # MODIFIED: Apply tags for row coloring based on signal
             tags = ()
             if 'signal' in df_display.columns:
-                if row['signal'] == 'Buy':
+                signal_value = str(row['signal']).lower()
+                if signal_value == 'buy':
                     tags = ('buy',)
-                elif row['signal'] == 'Sell':
+                elif signal_value == 'sell':
                     tags = ('sell',)
-            tree.insert("", tk.END, values=values, tags=tags)
+            
+            tree.insert("", "end", values=values_to_insert, tags=tags)
 
         # Update status bar or other UI elements if needed
         self.status_var.set(f"Displaying data for {sheet_key.capitalize()}")
@@ -372,49 +373,49 @@ class TradingApp:
         try:
             existing_sheets_data = {}
             if os.path.exists(EXCEL_FILE):
+                # ...existing code...
                 try:
-                    # Read all existing sheets to preserve them
-                    xls = pd.ExcelFile(EXCEL_FILE)
-                    for sheet_name_in_file in xls.sheet_names:
-                        if sheet_name_in_file not in TIMEFRAMES:
-                            existing_sheets_data[sheet_name_in_file] = pd.read_excel(xls, sheet_name=sheet_name_in_file)
-                except Exception as e:
-                    # Handle case where Excel file might be corrupted or unreadable
-                    print(f"Warning: Could not read existing sheets from {EXCEL_FILE} for preservation: {str(e)}")
-                    # Continue, will effectively overwrite if writer proceeds.
+                    # Load all sheets to preserve those not managed by self.data
+                    existing_excel = pd.ExcelFile(EXCEL_FILE)
+                    for sheet_name_existing in existing_excel.sheet_names:
+                        if sheet_name_existing not in self.data: # Only load if not in current app data
+                             existing_sheets_data[sheet_name_existing] = pd.read_excel(existing_excel, sheet_name_existing)
+                except Exception as e_read:
+                    print(f"Warning: Could not read existing sheets from {EXCEL_FILE} for preservation: {e_read}")
+                    # Decide if you want to proceed without preserving or stop. Here, we proceed.
 
             with pd.ExcelWriter(EXCEL_FILE, engine='openpyxl') as writer:
-                # 1. Write application-managed sheets (from self.data)
-                for sheet_name_app in TIMEFRAMES: # Iterate using a different variable name
-                    df_to_save = self.data.get(sheet_name_app)
-                    
-                    if df_to_save is None or not isinstance(df_to_save, pd.DataFrame):
-                        df_to_save = pd.DataFrame(columns=BASE_COLS_GUI)
-                    else:
-                        df_to_save = df_to_save.copy()
+                # Save data from the application (self.data)
+                for sheet_name, df_app in self.data.items():
+                    if df_app is not None and isinstance(df_app, pd.DataFrame):
+                        df_to_save = df_app.copy()
+                        
+                        # Define column order for saving: BASE_COLS_GUI + trends + NOTES_COL_GUI
+                        # Assuming TIMEFRAMES, BASE_COLS_GUI, NOTES_COL_GUI are accessible class/global constants
+                        other_timeframes_save = [tf for tf in TIMEFRAMES if tf != sheet_name] 
+                        trend_cols_for_save = sorted([f'{tf}_trend' for tf in other_timeframes_save])
+                        save_columns_ordered = BASE_COLS_GUI + trend_cols_for_save + [NOTES_COL_GUI]
 
-                    # Ensure all standard columns exist.
-                    for col in BASE_COLS_GUI:
-                        if col not in df_to_save.columns:
-                            if col == 'notes':
-                                df_to_save[col] = "" 
-                            else:
-                                df_to_save[col] = pd.NA
-                    
-                    df_to_save[NOTES_COL_GUI] = df_to_save[NOTES_COL_GUI].fillna("").astype(str)
-                    
-                    df_final = df_to_save.reindex(columns=BASE_COLS_GUI)
-                    
-                    for col in df_final.columns:
-                        if col != 'notes':
-                            df_final[col] = df_final[col].fillna("")
-                        elif col == 'notes': 
-                            df_final[col] = df_final[col].fillna("").astype(str)
-                            
-                    df_final.to_excel(writer, sheet_name=sheet_name_app, index=False)
+                        # Ensure all necessary columns exist in df_to_save, fill with "" if not
+                        for col in save_columns_ordered:
+                            if col not in df_to_save.columns:
+                                df_to_save[col] = ""
+                        
+                        if NOTES_COL_GUI in df_to_save.columns:
+                            df_to_save[NOTES_COL_GUI] = df_to_save[NOTES_COL_GUI].fillna("").astype(str)
+                        else: # Should be created by the loop above
+                            df_to_save[NOTES_COL_GUI] = ""
 
-                # 2. Write back other existing sheets (e.g., "symbols")
+                        # Reindex to the desired order for saving
+                        final_save_df = df_to_save.reindex(columns=save_columns_ordered, fill_value="")
+                        
+                        final_save_df.to_excel(writer, sheet_name=sheet_name, index=False)
+
+                # Preserve other sheets from the original Excel file
                 for sheet_name_existing, df_existing in existing_sheets_data.items():
+                    # This condition was: if sheet_name_existing not in self.data:
+                    # It's already handled when populating existing_sheets_data.
+                    # Just write all collected existing sheets.
                     df_existing.to_excel(writer, sheet_name=sheet_name_existing, index=False)
             
             self.status_var.set("Data saved to Excel, non-managed sheets preserved.")
@@ -459,21 +460,26 @@ class TradingApp:
             tree = self.trees[sheet]
 
             # Identify column and item
-            column_id = tree.identify_column(event.x)
+            column_id = tree.identify_column(event.x) # e.g., '#3'
             item_id = tree.identify_row(event.y)
 
             if not item_id or not column_id:
                 return # Click outside of a cell
 
             column_idx = int(column_id.replace('#', '')) -1 # Treeview columns are 1-indexed
+            
+            # Get the actual column names from the treeview configuration
+            actual_tree_columns = tree["columns"] # This is current_sheet_columns from display_data
 
             # Ensure we are clicking on the 'notes' column
-            if column_idx < 0 or column_idx >= len(BASE_COLS_GUI) or BASE_COLS_GUI[column_idx] != 'notes':
+            # MODIFIED: Check against actual_tree_columns and NOTES_COL_GUI
+            if column_idx < 0 or column_idx >= len(actual_tree_columns) or actual_tree_columns[column_idx] != NOTES_COL_GUI:
                 return
         except Exception: # Catch any error during identification (e.g. if click is not on a cell)
             return
 
         current_values = tree.item(item_id, "values")
+        # The column_idx now correctly refers to the position of NOTES_COL_GUI in actual_tree_columns
         current_note = current_values[column_idx] if column_idx < len(current_values) else ""
         
         entry = tk.Entry(tree, relief=tk.SOLID) # Use a solid relief for visibility
@@ -489,16 +495,14 @@ class TradingApp:
             tree.item(item_id, values=updated_values)
             
             # Update DataFrame (self.data)
-            # We need a reliable way to find the row in the DataFrame.
-            # Using the tree item's current values for datetime, token, signal as a key.
-            # This assumes these columns are present and their order in BASE_COLS_GUI.
-            
             try:
-                dt_idx = BASE_COLS_GUI.index('datetime')
-                tk_idx = BASE_COLS_GUI.index('token')
-                sg_idx = BASE_COLS_GUI.index('signal')
-            except ValueError:
-                messagebox.showerror("Error", "Key columns (datetime, token, signal) not found for saving note.")
+                # Get indices of key columns from the actual tree column list
+                # This assumes 'datetime', 'token', 'signal' are always present in tree display
+                dt_idx = actual_tree_columns.index('datetime')
+                tk_idx = actual_tree_columns.index('token')
+                sg_idx = actual_tree_columns.index('signal')
+            except ValueError: # If any key column is not in actual_tree_columns
+                messagebox.showerror("Error", "Key columns (datetime, token, signal) not found in tree display for saving note.")
                 entry.destroy()
                 return
 
@@ -532,8 +536,8 @@ class TradingApp:
             matching_indices = df_sheet.index[mask].tolist()
             
             if matching_indices:
-                # Update the 'notes' for the first matched row
-                df_sheet.loc[matching_indices[0], 'notes'] = new_note_value
+                # Update the 'notes' for the first matched row using NOTES_COL_GUI
+                df_sheet.loc[matching_indices[0], NOTES_COL_GUI] = new_note_value
                 self.save_data_to_excel() # Persist change to Excel immediately
             else:
                 print(f"Warning: Could not find matching row in DataFrame for sheet {sheet} to save note.")
@@ -627,15 +631,31 @@ class TradingApp:
                     if df_app is not None and isinstance(df_app, pd.DataFrame):
                         df_to_export = df_app.copy()
                         
-                        # Ensure all standard columns exist and notes are properly formatted
-                        for col in BASE_COLS_GUI:
-                            if col not in df_to_export.columns:
-                                df_to_export[col] = "" if col == 'notes' else pd.NA
+                        # Determine trend columns for this specific sheet for export
+                        other_timeframes_export = [tf for tf in TIMEFRAMES if tf != sheet_name]
+                        trend_cols_for_export = sorted([f'{tf}_trend' for tf in other_timeframes_export])
                         
-                        df_to_export['notes'] = df_to_export['notes'].fillna("").astype(str)
+                        # Define the desired column order for export, with NOTES_COL_GUI at the end
+                        export_columns_ordered = BASE_COLS_GUI + trend_cols_for_export + [NOTES_COL_GUI]
 
-                        final_export_df = df_to_export.reindex(columns=BASE_COLS_GUI, fill_value="")
-                        final_export_df['notes'] = final_export_df['notes'].fillna("").astype(str)
+                        # Ensure all necessary columns exist in df_to_export, fill with "" if not
+                        for col in export_columns_ordered:
+                            if col not in df_to_export.columns:
+                                df_to_export[col] = ""
+                        
+                        # Ensure notes column is string and filled
+                        if NOTES_COL_GUI in df_to_export.columns:
+                            df_to_export[NOTES_COL_GUI] = df_to_export[NOTES_COL_GUI].fillna("").astype(str)
+                        else: # Should be created by the loop above if NOTES_COL_GUI is in export_columns_ordered
+                            df_to_export[NOTES_COL_GUI] = ""
+
+
+                        # Reindex to the desired order
+                        final_export_df = df_to_export.reindex(columns=export_columns_ordered, fill_value="")
+                        
+                        # Ensure notes is string after reindex, if it exists in final_export_df
+                        if NOTES_COL_GUI in final_export_df.columns:
+                           final_export_df[NOTES_COL_GUI] = final_export_df[NOTES_COL_GUI].fillna("").astype(str)
 
                         final_export_df.to_excel(writer, sheet_name=sheet_name, index=False)
             
