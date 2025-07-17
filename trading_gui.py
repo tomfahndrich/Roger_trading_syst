@@ -5,9 +5,11 @@ import pandas as pd
 from trading_signal_generator import main as generate_signals, TIMEFRAMES, EXCEL_FILE
 
 # Define constants for column names, mirroring trading_signal_generator.py
-# BASE_COLS from trading_signal_generator.py: ['datetime', 'signal', 'token', 'close price', 'CCI', 'stoch K', 'stoch D', 'slope K', 'slope D']
+# BASE_COLS from trading_signal_generator.py: ['datetime', 'signal', 'token', 'close price', 'CCI', 'stoch K', 'stoch D', 'slope K', 'slope D', 'ADX']
 # NOTES_COL from trading_signal_generator.py: 'notes'
-BASE_COLS_GUI = ['datetime', 'signal', 'token', 'close price', 'CCI', 'stoch K', 'stoch D', 'slope K', 'slope D']
+BASE_COLS_GUI = ['datetime', 'signal', 'token', 'close price', 'CCI', 'stoch K', 'stoch D', 'slope K', 'slope D', 'ADX']
+# Hidden columns (used for calculations but not displayed)
+HIDDEN_COLS_GUI = ['plus_di', 'minus_di']
 NOTES_COL_GUI = 'notes'
 
 # Create a tooltip class for better UI
@@ -51,6 +53,7 @@ COLUMN_WIDTHS = {
     'stoch D': 80,
     'slope K': 80,
     'slope D': 80,
+    'ADX': 80,
     # Trend columns will be added dynamically, default width can be set or handled in display_data
 }
 
@@ -74,13 +77,21 @@ class TradingApp:
         for sheet in TIMEFRAMES:
             other_timeframes = [tf for tf in TIMEFRAMES if tf != sheet]
             trend_cols_for_this_sheet = sorted([f'{tf}_trend' for tf in other_timeframes])
-            current_sheet_columns = BASE_COLS_GUI + trend_cols_for_this_sheet + [NOTES_COL_GUI]
+            all_columns = BASE_COLS_GUI + trend_cols_for_this_sheet + [NOTES_COL_GUI] + HIDDEN_COLS_GUI
             
-            df = pd.DataFrame(columns=current_sheet_columns)
+            # Create DataFrame with all columns
+            df = pd.DataFrame(columns=all_columns)
+            
+            # Ensure notes column is properly initialized as string
             if NOTES_COL_GUI in df.columns:
                 df[NOTES_COL_GUI] = df[NOTES_COL_GUI].astype(str)
-            else: # Should not happen if current_sheet_columns includes NOTES_COL_GUI
+            else: # Should not happen if all_columns includes NOTES_COL_GUI
                 df[NOTES_COL_GUI] = pd.Series(dtype=str)
+                
+            # Initialize hidden columns with empty strings
+            for col in HIDDEN_COLS_GUI:
+                df[col] = ""
+                
             self.data[sheet] = df
             
         # Create menu
@@ -237,9 +248,11 @@ class TradingApp:
             hsb.pack(side=tk.BOTTOM, fill=tk.X)
             tree.pack(fill=tk.BOTH, expand=True)
             
-            # Configure tags for Buy/Sell colors
-            tree.tag_configure('buy', background='#c8e6c9')   # Light green
-            tree.tag_configure('sell', background='#ffcdd2')  # Light red
+            # Configure tags for Buy/Sell colors with different intensities
+            tree.tag_configure('buy+', background='#4CAF50')  # Strong green for Buy+
+            tree.tag_configure('buy', background='#C8E6C9')   # Light green for Buy
+            tree.tag_configure('sell', background='#FFCDD2')  # Light red for Sell
+            tree.tag_configure('sell+', background='#F44336') # Strong red for Sell+
             
             # Enable editing the notes column
             tree.bind("<Double-1>", self.on_double_click)
@@ -271,7 +284,7 @@ class TradingApp:
                         # Determine expected columns for this sheet
                         other_timeframes = [tf for tf in TIMEFRAMES if tf != sheet_name_from_excel]
                         trend_cols_for_this_sheet = sorted([f'{tf}_trend' for tf in other_timeframes])
-                        expected_cols = BASE_COLS_GUI + trend_cols_for_this_sheet + [NOTES_COL_GUI]
+                        expected_cols = BASE_COLS_GUI + trend_cols_for_this_sheet + [NOTES_COL_GUI] + HIDDEN_COLS_GUI
                         
                         # Create a new DataFrame with expected columns
                         df_structured = pd.DataFrame(columns=expected_cols)
@@ -304,9 +317,13 @@ class TradingApp:
             for sheet in TIMEFRAMES:
                 other_timeframes = [tf for tf in TIMEFRAMES if tf != sheet]
                 trend_cols_for_this_sheet = sorted([f'{tf}_trend' for tf in other_timeframes])
-                current_sheet_columns = BASE_COLS_GUI + trend_cols_for_this_sheet + [NOTES_COL_GUI]
-                df = pd.DataFrame(columns=current_sheet_columns)
+                all_columns = BASE_COLS_GUI + trend_cols_for_this_sheet + [NOTES_COL_GUI] + HIDDEN_COLS_GUI
+                df = pd.DataFrame(columns=all_columns)
+                # Ensure notes column is properly initialized
                 df[NOTES_COL_GUI] = df[NOTES_COL_GUI].astype(str)
+                # Initialize hidden columns
+                for col in HIDDEN_COLS_GUI:
+                    df[col] = ""
                 self.data[sheet] = df
             self.display_all_data()
 
@@ -323,14 +340,16 @@ class TradingApp:
         other_timeframes = [tf for tf in TIMEFRAMES if tf != sheet_key]
         trend_cols_for_this_sheet = sorted([f'{tf}_trend' for tf in other_timeframes])
         current_sheet_columns = BASE_COLS_GUI + trend_cols_for_this_sheet + [NOTES_COL_GUI]
+        # All columns including hidden ones
+        all_columns = current_sheet_columns + HIDDEN_COLS_GUI
 
-        df_display = pd.DataFrame(columns=current_sheet_columns)
+        df_display = pd.DataFrame(columns=all_columns)
         if sheet_key in self.data and isinstance(self.data[sheet_key], pd.DataFrame):
             df_from_data = self.data[sheet_key].copy()
-            for col in current_sheet_columns:
+            for col in all_columns:
                 if col not in df_from_data.columns:
                     df_from_data[col] = ""
-            df_display = df_from_data.reindex(columns=current_sheet_columns, fill_value="")
+            df_display = df_from_data.reindex(columns=all_columns, fill_value="")
         
         if NOTES_COL_GUI in df_display.columns:
             df_display[NOTES_COL_GUI] = df_display[NOTES_COL_GUI].fillna("").astype(str)
@@ -352,16 +371,56 @@ class TradingApp:
         
         # Insert data
         for index, row in df_display.iterrows():
-            values_to_insert = [str(row[col]) if pd.notna(row[col]) else "" for col in current_sheet_columns]
+            # Format ADX value with + or - prefix based on plus_di and minus_di
+            adx_formatted = ""
+            try:
+                if 'ADX' in row and pd.notna(row['ADX']):
+                    adx_value = row['ADX']
+                    plus_di = row.get('plus_di', 0)
+                    minus_di = row.get('minus_di', 0)
+                    
+                    # Handle potential non-numeric values
+                    try:
+                        adx_value = float(adx_value)
+                        plus_di = float(plus_di) if pd.notna(plus_di) else 0
+                        minus_di = float(minus_di) if pd.notna(minus_di) else 0
+                        
+                        if pd.notna(plus_di) and pd.notna(minus_di):
+                            if plus_di > minus_di:
+                                adx_formatted = f"+{adx_value:.2f}"
+                            elif minus_di > plus_di:
+                                adx_formatted = f"-{adx_value:.2f}"
+                            else:
+                                adx_formatted = f"{adx_value:.2f}"
+                        else:
+                            adx_formatted = f"{adx_value:.2f}"
+                    except (ValueError, TypeError):
+                        # If conversion fails, use the raw value as string
+                        adx_formatted = str(adx_value)
+            except Exception as e:
+                print(f"Error formatting ADX value: {e}")
+                adx_formatted = ""
             
-            # MODIFIED: Apply tags for row coloring based on signal
+            # Create the values to insert with formatted ADX
+            values_to_insert = []
+            for col in current_sheet_columns:
+                if col == 'ADX' and adx_formatted:
+                    values_to_insert.append(adx_formatted)
+                else:
+                    values_to_insert.append(str(row[col]) if pd.notna(row[col]) else "")
+            
+            # Apply tags for row coloring based on signal
             tags = ()
             if 'signal' in df_display.columns:
                 signal_value = str(row['signal']).lower()
-                if signal_value == 'buy':
+                if signal_value == 'buy+':
+                    tags = ('buy+',)
+                elif signal_value == 'buy':
                     tags = ('buy',)
                 elif signal_value == 'sell':
                     tags = ('sell',)
+                elif signal_value == 'sell+':
+                    tags = ('sell+',)
             
             tree.insert("", "end", values=values_to_insert, tags=tags)
 
@@ -390,11 +449,11 @@ class TradingApp:
                     if df_app is not None and isinstance(df_app, pd.DataFrame):
                         df_to_save = df_app.copy()
                         
-                        # Define column order for saving: BASE_COLS_GUI + trends + NOTES_COL_GUI
+                        # Define column order for saving: BASE_COLS_GUI + trends + NOTES_COL_GUI + hidden columns
                         # Assuming TIMEFRAMES, BASE_COLS_GUI, NOTES_COL_GUI are accessible class/global constants
                         other_timeframes_save = [tf for tf in TIMEFRAMES if tf != sheet_name] 
                         trend_cols_for_save = sorted([f'{tf}_trend' for tf in other_timeframes_save])
-                        save_columns_ordered = BASE_COLS_GUI + trend_cols_for_save + [NOTES_COL_GUI]
+                        save_columns_ordered = BASE_COLS_GUI + trend_cols_for_save + [NOTES_COL_GUI] + HIDDEN_COLS_GUI
 
                         # Ensure all necessary columns exist in df_to_save, fill with "" if not
                         for col in save_columns_ordered:
@@ -431,19 +490,38 @@ class TradingApp:
             self.root.update_idletasks()
             
             # 1. Save current notes from GUI (self.data) to Excel file
-            self.save_data_to_excel() 
+            try:
+                self.save_data_to_excel()
+                self.status_var.set("Saved current data, generating new signals...")
+                self.root.update_idletasks()
+            except Exception as save_error:
+                print(f"Warning: Error saving data to Excel: {save_error}")
+                messagebox.showwarning("Save Warning", f"Error saving current data: {str(save_error)}\nContinuing with signal generation...")
 
-            # 2. Run signal generator (assumed to read from and write to EXCEL_FILE)
-            generate_signals()
+            # 2. Run signal generator with error handling
+            try:
+                generate_signals()
+                self.status_var.set("Signals generated, loading updated data...")
+                self.root.update_idletasks()
+            except Exception as gen_error:
+                print(f"Error generating signals: {gen_error}")
+                messagebox.showerror("Signal Error", f"Error generating trading signals: {str(gen_error)}")
+                self.status_var.set(f"Error generating signals: {str(gen_error)}")
+                return  # Exit early if signal generation fails
             
             # 3. Reload data from Excel to reflect all changes
-            self.load_data() # This will also refresh the display
-            
-            self.status_var.set("Data updated successfully")
-            messagebox.showinfo("Success", "Trading data updated successfully")
+            try:
+                self.load_data()  # This will also refresh the display
+                self.status_var.set("Data updated successfully")
+                messagebox.showinfo("Success", "Trading data updated successfully")
+            except Exception as load_error:
+                print(f"Error loading updated data: {load_error}")
+                messagebox.showerror("Load Error", f"Error loading updated data: {str(load_error)}")
+                self.status_var.set(f"Error loading updated data: {str(load_error)}")
             
         except Exception as e:
-            messagebox.showerror("Error", f"Error updating data: {str(e)}")
+            print(f"Unexpected error in update_data: {e}")
+            messagebox.showerror("Error", f"Unexpected error updating data: {str(e)}")
             self.status_var.set(f"Error updating data: {str(e)}")
 
     def on_double_click(self, event):
@@ -570,7 +648,15 @@ class TradingApp:
         df_to_display = df_full
         
         if signal_type != "all" and 'signal' in df_full.columns:
-            df_to_display = df_full[df_full['signal'].astype(str).str.lower() == signal_type.lower()]
+            if signal_type.lower() == "buy":
+                # Show both Buy and Buy+ signals
+                df_to_display = df_full[df_full['signal'].astype(str).str.lower().str.startswith('buy')]
+            elif signal_type.lower() == "sell":
+                # Show both Sell and Sell+ signals
+                df_to_display = df_full[df_full['signal'].astype(str).str.lower().str.startswith('sell')]
+            else:
+                # For specific signals like 'buy+' or 'sell+'
+                df_to_display = df_full[df_full['signal'].astype(str).str.lower() == signal_type.lower()]
         
         # Create a temporary display DataFrame to pass to display_data
         # This avoids modifying self.data[sheet] directly for filtering purposes
@@ -635,8 +721,8 @@ class TradingApp:
                         other_timeframes_export = [tf for tf in TIMEFRAMES if tf != sheet_name]
                         trend_cols_for_export = sorted([f'{tf}_trend' for tf in other_timeframes_export])
                         
-                        # Define the desired column order for export, with NOTES_COL_GUI at the end
-                        export_columns_ordered = BASE_COLS_GUI + trend_cols_for_export + [NOTES_COL_GUI]
+                        # Define the desired column order for export, with NOTES_COL_GUI and hidden columns
+                        export_columns_ordered = BASE_COLS_GUI + trend_cols_for_export + [NOTES_COL_GUI] + HIDDEN_COLS_GUI
 
                         # Ensure all necessary columns exist in df_to_export, fill with "" if not
                         for col in export_columns_ordered:
@@ -648,6 +734,11 @@ class TradingApp:
                             df_to_export[NOTES_COL_GUI] = df_to_export[NOTES_COL_GUI].fillna("").astype(str)
                         else: # Should be created by the loop above if NOTES_COL_GUI is in export_columns_ordered
                             df_to_export[NOTES_COL_GUI] = ""
+                            
+                        # Ensure hidden columns are properly initialized
+                        for col in HIDDEN_COLS_GUI:
+                            if col not in df_to_export.columns:
+                                df_to_export[col] = ""
 
 
                         # Reindex to the desired order
@@ -656,6 +747,11 @@ class TradingApp:
                         # Ensure notes is string after reindex, if it exists in final_export_df
                         if NOTES_COL_GUI in final_export_df.columns:
                            final_export_df[NOTES_COL_GUI] = final_export_df[NOTES_COL_GUI].fillna("").astype(str)
+                           
+                        # Ensure hidden columns are present
+                        for col in HIDDEN_COLS_GUI:
+                            if col not in final_export_df.columns:
+                                final_export_df[col] = ""
 
                         final_export_df.to_excel(writer, sheet_name=sheet_name, index=False)
             
