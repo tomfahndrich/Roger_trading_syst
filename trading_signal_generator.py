@@ -28,14 +28,14 @@ def compute_stoch(df, window, k_smooth, d_smooth):
     low_n  = df['Low'].rolling(window).min()
     high_n = df['High'].rolling(window).max()
     raw_k  = 100 * (df['Close'] - low_n) / (high_n - low_n)
-    k_series = SMAIndicator(raw_k, window=k_smooth, fillna=False).sma_indicator()
-    d_series = SMAIndicator(k_series, window=d_smooth, fillna=False).sma_indicator()
+    k_series = SMAIndicator(raw_k, window=k_smooth, fillna=True).sma_indicator()
+    d_series = SMAIndicator(k_series, window=d_smooth, fillna=True).sma_indicator()
     return k_series, d_series
 
 def compute_cci(df, period):
     return CCIIndicator(
         high=df['High'], low=df['Low'], close=df['Close'],
-        window=period, constant=0.015, fillna=False
+        window=period, constant=0.015, fillna=True
     ).cci()
 
 def slope(series):
@@ -48,7 +48,7 @@ def slope(series):
 def compute_dmi(df, period):
     """Compute +DI, -DI, and ADX using Wilder's smoothing."""
     try:
-        dmi = ADXIndicator(high=df['High'], low=df['Low'], close=df['Close'], window=period, fillna=False)
+        dmi = ADXIndicator(high=df['High'], low=df['Low'], close=df['Close'], window=period, fillna=True)
         return dmi.adx_pos(), dmi.adx_neg(), dmi.adx()
     except Exception:
         # If data too short or error, return NA series

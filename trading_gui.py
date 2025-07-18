@@ -611,7 +611,13 @@ class TradingApp:
         df_to_display = df_full
         
         if signal_type != "all" and 'signal' in df_full.columns:
-            df_to_display = df_full[df_full['signal'].astype(str).str.lower() == signal_type.lower()]
+            sig_series = df_full['signal'].astype(str).str.lower()
+            if signal_type.lower() == 'buy':
+                df_to_display = df_full[sig_series.isin(['buy', 'buy+'])]
+            elif signal_type.lower() == 'sell':
+                df_to_display = df_full[sig_series.isin(['sell', 'sell+'])]
+            else:
+                df_to_display = df_full[sig_series == signal_type.lower()]
         
         # Create a temporary display DataFrame to pass to display_data
         # This avoids modifying self.data[sheet] directly for filtering purposes
