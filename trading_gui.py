@@ -198,6 +198,20 @@ class TradingApp:
         clear_btn.pack(side=tk.LEFT, padx=1)
         ToolTip(clear_btn, "Clear token filter")
         
+        # Add slope threshold filter
+        slope_filter_frame = tk.Frame(filter_frame, bg="#DCDAD5")
+        slope_filter_frame.pack(side=tk.LEFT, padx=10)
+        
+        slope_label = tk.Label(slope_filter_frame, text="Slope >", bg="#DCDAD5", fg="black", font=("Arial", 11))
+        slope_label.pack(side=tk.LEFT, padx=2)
+        
+        self.slope_var = tk.StringVar()
+        self.slope_var.trace_add("write", lambda name, index, mode, sv=self.slope_var: self.filter_by_slope(sv.get()))
+        slope_entry = tk.Entry(slope_filter_frame, textvariable=self.slope_var, width=5, 
+                              bg="white", fg="black")
+        slope_entry.pack(side=tk.LEFT, padx=2)
+        ToolTip(slope_entry, "Show rows where abs(slope K) and abs(slope D) exceed this value")
+        
         # Add info label with icon
         info_frame = tk.Frame(button_frame, bg="#f0f0f0")
         info_frame.pack(side=tk.RIGHT, padx=10)
@@ -363,10 +377,12 @@ class TradingApp:
                 if col == 'ADX':
                     try:
                         val = float(row['ADX'])
+                        # Round to one decimal
+                        val_rounded = round(val, 1)
                         di_plus = self.data[sheet_key].loc[row.name, '+DI'] if '+DI' in self.data[sheet_key].columns else pd.NA
                         di_minus = self.data[sheet_key].loc[row.name, '-DI'] if '-DI' in self.data[sheet_key].columns else pd.NA
                         sign = '+' if pd.notna(di_plus) and pd.notna(di_minus) and di_plus >= di_minus else '-'
-                        formatted = f"{sign}{int(round(val))}"
+                        formatted = f"{sign}{val_rounded:.1f}"
                     except Exception:
                         formatted = ""
                     values_to_insert.append(formatted)
@@ -634,6 +650,30 @@ class TradingApp:
         self.data[sheet] = current_data_for_sheet # Restore original
 
         self.status_var.set(f"Displaying tokens matching '{token_text}' for {sheet.capitalize()}")
+    
+    def filter_by_slope(self, slope_threshold):
+        """Filter data based on slope K and D thresholds"""
+        if not slope_threshold:
+            self.filter_signals("all")
+            return
+        try:
+            threshold = float(slope_threshold)
+        except ValueError:
+            return
+        current_tab_id = self.notebook.select()
+        if not current_tab_id:
+            return
+        sheet = self.notebook.tab(current_tab_id, "text").lower()
+        if sheet not in self.data or not isinstance(self.data[sheet], pd.DataFrame):
+            return
+        df_full = self.data[sheet].copy()
+        df_to_display = df_full[(df_full['slope K'].abs() > threshold) & (df_full['slope D'].abs() > threshold)]
+        # Temporarily set and display
+        backup = self.data[sheet]
+        self.data[sheet] = df_to_display
+        self.display_data(sheet)
+        self.data[sheet] = backup
+        self.status_var.set(f"Displaying rows with slope > {slope_threshold} for {sheet.capitalize()}")
     
     def clear_token_filter(self):
         """Clear token filter and show all data"""
