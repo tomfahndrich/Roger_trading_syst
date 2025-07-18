@@ -20,6 +20,8 @@ STOCH_PARAMS = {
 CCI_PERIOD   = 20
 SLOPE_PERIOD = 10
 DMI_PERIOD   = 14  # Classic DMI period
+SLOPE_THRESHOLD = 0.5  # Minimum slope magnitude to consider significant
+ADX_THRESHOLD = 20  # ADX threshold for trend strength
 
 # INDICATOR FUNCTIONS
 def compute_stoch(df, window, k_smooth, d_smooth):
@@ -66,13 +68,13 @@ def signal_from_indicators(df):
     sig = 'Neutral'
     # Buy conditions
     if (k_now > d_now) and (cci_now < -100):
-        if pd.notna(di_plus) and pd.notna(di_minus) and pd.notna(adx_now) and (di_plus >= di_minus and adx_now > 20) and (abs(slope_k) > 0.5 and abs(slope_d) > 0.5):
+        if pd.notna(di_plus) and pd.notna(di_minus) and pd.notna(adx_now) and (di_plus >= di_minus and adx_now > ADX_THRESHOLD) and (abs(slope_k) > SLOPE_THRESHOLD and abs(slope_d) > SLOPE_THRESHOLD):
             sig = 'Buy+'
         else:
             sig = 'Buy'
     # Sell conditions
     elif (k_now < d_now) and (cci_now > 100):
-        if pd.notna(di_plus) and pd.notna(di_minus) and pd.notna(adx_now) and (di_minus > di_plus and adx_now > 20) and (abs(slope_k) > 0.5 and abs(slope_d) > 0.5):
+        if pd.notna(di_plus) and pd.notna(di_minus) and pd.notna(adx_now) and (di_minus > di_plus and adx_now > ADX_THRESHOLD) and (abs(slope_k) > SLOPE_THRESHOLD and abs(slope_d) > SLOPE_THRESHOLD):
             sig = 'Sell+'
         else:
             sig = 'Sell'

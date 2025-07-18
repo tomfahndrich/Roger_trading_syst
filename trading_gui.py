@@ -4,7 +4,6 @@ from tkinter import ttk, messagebox, filedialog
 import pandas as pd
 from trading_signal_generator import main as generate_signals, TIMEFRAMES, EXCEL_FILE
 
-# Define constants for column names, mirroring trading_signal_generator.py
 # BASE_COLS from trading_signal_generator.py: ['datetime', 'signal', 'token', 'close price', 'CCI', 'stoch K', 'stoch D', 'slope K', 'slope D', 'ADX']
 BASE_COLS_GUI = ['datetime', 'signal', 'token', 'close price', 'CCI', 'stoch K', 'stoch D', 'slope K', 'slope D', 'ADX']
 # Hidden DMI columns for internal use (not displayed)
