@@ -14,13 +14,25 @@ This project is a trading signal generator and management system designed to hel
 
 ## Features
 
-- Automated generation of trading signals based on technical indicators (Stochastic, CCI).
-- Interactive GUI for viewing and analyzing trading signals.
-- Filtering capabilities by signal type (Buy/Sell) and token symbols.
-- Note-taking functionality for individual signals, automatically saved to Excel.
-- Integration with Excel for data storage and analysis.
-- Support for multiple timeframes (weekly, daily, 4h).
-- Modular architecture for easy extension and customization.
+- Automated generation of trading signals based on technical indicators:
+  - Stochastic Oscillator (%K, %D)
+  - Commodity Channel Index (CCI)
+  - Directional Movement Index (DMI): +DI, -DI, and Average Directional Index (ADX)
+- Four signal types:
+  - Buy+: Strong bullish signal when %K > %D, CCI < -100, +DI ≥ -DI, ADX > 20, and significant slopes
+  - Buy: Bullish signal when %K > %D and CCI < -100
+  - Sell: Bearish signal when %K < %D and CCI > 100
+  - Sell+: Strong bearish signal when %K < %D, CCI > 100, -DI > +DI, ADX > 20, and significant slopes
+- Interactive GUI with color-coded rows:
+  - Buy+ in green, Buy in light green
+  - Sell in light red, Sell+ in red
+- ADX column displays the ADX value (rounded to one decimal) with a “+” or “-” prefix indicating trend direction
+- Slope threshold filter to show only signals where |slope K| and |slope D| exceed a user-defined value
+- Advanced filtering:
+  - All shows every signal
+  - Buy shows both Buy and Buy+
+  - Sell shows both Sell and Sell+
+  - Token search and clear filter
 
 ## Getting Started
 
@@ -60,16 +72,20 @@ The GUI provides several features to make working with trading signals easier:
 
 1. **Main Dashboard**
    - **Update Data**: Fetches new signals and updates the Excel file
-   - **Tabs for Different Timeframes**: Switch between weekly, daily, and 4-hour timeframes
+   - **Tabs for Different Timeframes**: Switch between Monthly, Weekly, Daily, and 4-hour views
 
 2. **Filtering Options**
-   - **All/Buy/Sell Buttons**: Quickly filter signals by type
-   - **Token Search**: Type any part of a token symbol to filter results
+   - **All/Buy/Sell Buttons**: "Buy" shows Buy & Buy+; "Sell" shows Sell & Sell+
+   - **Token Search**: Type any part of a token symbol to filter
+   - **Slope >**: Enter a decimal (e.g., 0.6) to filter on slope magnitude
    - **Clear Filter**: Reset all filters with the "✕" button
 
-3. **Managing Notes**
-   - **Double-click** on any note field to add or edit notes
-   - Notes are automatically saved to the Excel file
+3. **ADX Column**
+   - Shows the ADX value with one decimal and a prefix (+/-) to indicate trend
+
+4. **Managing Notes**
+   - **Double-click** any note field to add or edit notes
+   - Notes auto-save to Excel
 
 ## Notes
 
