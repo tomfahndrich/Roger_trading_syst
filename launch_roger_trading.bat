@@ -8,7 +8,7 @@ REM Change to the script's directory.
 cd /D "%SCRIPT_DIR%"
 
 REM Update the remote tracking information
-git fetch origin Roger
+git fetch origin Roger2
 
 REM Checkout only specific files from the Roger branch
 git checkout origin/Roger -- trading_gui.py trading_signal_generator.py
