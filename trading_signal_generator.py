@@ -20,7 +20,7 @@ STOCH_PARAMS = {
 CCI_PERIOD   = 20
 SLOPE_PERIOD = 10
 DMI_PERIOD   = 14  # Classic DMI period
-SLOPE_THRESHOLD = 0.5  # Minimum slope magnitude to consider significant
+SLOPE_THRESHOLD = 0.4  # Minimum slope magnitude to consider significant
 ADX_THRESHOLD = 20  # ADX threshold for trend strength
 
 # INDICATOR FUNCTIONS
