@@ -158,6 +158,8 @@ def main():
                 print(f"Signal for {token} ({sheet}): {sig}")
             
             last_row_data = ind.iloc[-1]
+            # Add sign to ADX based on DMI comparison
+            signed_adx = f"+{abs(adx_now):.2f}" if (pd.notna(di_plus) and pd.notna(di_minus) and di_plus >= di_minus) else f"-{abs(adx_now):.2f}"
             signal_entry = {
                 'datetime'   : last_row_data.name,
                 'signal'     : sig,
@@ -170,7 +172,7 @@ def main():
                 'slope D'    : slope_d,
                 '+DI'        : di_plus,
                 '-DI'        : di_minus,
-                'ADX'        : adx_now,
+                'ADX'        : signed_adx,
             }
             new_signals[sheet].append(signal_entry)
 

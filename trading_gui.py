@@ -304,7 +304,20 @@ class TradingApp:
                             df_structured[NOTES_COL_GUI] = df_structured[NOTES_COL_GUI].fillna("").astype(str)
                         else:
                             df_structured[NOTES_COL_GUI] = ""
-                            
+                        # Ensure ADX column values include sign
+                        def _add_sign_to_adx(v):
+                            if pd.isna(v) or v == "":
+                                return ""
+                            s = str(v)
+                            if s.startswith('+') or s.startswith('-'):
+                                return s
+                            try:
+                                num = float(v)
+                            except:
+                                return s
+                            sign = '+' if num >= 0 else '-'
+                            return f"{sign}{abs(num):.1f}"
+                        df_structured['ADX'] = df_structured['ADX'].apply(_add_sign_to_adx)
                         self.data[sheet_name_from_excel] = df_structured
             else:
                 messagebox.showinfo("Info", f"{EXCEL_FILE} not found. Displaying empty tables.")
@@ -375,19 +388,23 @@ class TradingApp:
             values_to_insert = []
             for col in display_columns:
                 if col == 'ADX':
-                    try:
-                        val = float(row['ADX'])
-                        # Round to one decimal
-                        val_rounded = round(val, 1)
-                        di_plus = self.data[sheet_key].loc[row.name, '+DI'] if '+DI' in self.data[sheet_key].columns else pd.NA
-                        di_minus = self.data[sheet_key].loc[row.name, '-DI'] if '-DI' in self.data[sheet_key].columns else pd.NA
-                        sign = '+' if pd.notna(di_plus) and pd.notna(di_minus) and di_plus >= di_minus else '-'
-                        formatted = f"{sign}{val_rounded:.1f}"
-                    except Exception:
+                    # Ensure '+' sign for positive ADX values if missing
+                    raw_val = row['ADX']
+                    if pd.isna(raw_val) or raw_val == "":
                         formatted = ""
+                    else:
+                        s = str(raw_val)
+                        if s.startswith('+') or s.startswith('-'):
+                            formatted = s
+                        else:
+                            try:
+                                num = float(s)
+                                formatted = f"{ '+' if num>=0 else '-' }{abs(num):.1f}"
+                            except Exception:
+                                formatted = s
                     values_to_insert.append(formatted)
                 else:
-                    values_to_insert.append(str(row[col]) if pd.notna(row[col]) else"")
+                    values_to_insert.append(str(row[col]) if pd.notna(row[col]) else "")
              
             # Apply tags for row coloring based on signal
             sig = str(row['signal']).lower()
