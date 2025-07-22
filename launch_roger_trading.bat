@@ -1,5 +1,5 @@
 @echo off
-REM This script updates the local repository and launches the Roger Trading System GUI.
+REM This script updates two specific .py files from the Roger branch and launches the GUI.
 
 REM Get the directory of this batch file.
 set SCRIPT_DIR=%~dp0
@@ -7,9 +7,13 @@ set SCRIPT_DIR=%~dp0
 REM Change to the script's directory.
 cd /D "%SCRIPT_DIR%"
 
-echo Updating the local repository...
-REM Pull the latest changes from the remote repository.
-git pull
+REM Update the remote tracking information
+git fetch origin Roger
+
+REM Checkout only specific files from the Roger branch
+git checkout origin/Roger -- trading_gui.py trading_signal_generator.py
+
+echo Updated trading_gui.py and signal_generator.py from branch Roger.
 
 echo Attempting to launch Roger Trading System GUI...
 echo Please ensure Python 3 is installed and all required packages (pandas, yfinance, ta, openpyxl, etc.) are available.
@@ -19,6 +23,3 @@ REM Execute the Python GUI script.
 python trading_gui.py
 
 echo Roger Trading System script has finished or the window was closed.
-REM You can add 'pause' on the line below if you want this window to stay open
-REM after the GUI closes, to read any messages.
-REM pause
