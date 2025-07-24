@@ -198,19 +198,27 @@ class TradingApp:
         clear_btn.pack(side=tk.LEFT, padx=1)
         ToolTip(clear_btn, "Clear token filter")
         
-        # Add slope threshold filter
-        slope_filter_frame = tk.Frame(filter_frame, bg="#DCDAD5")
-        slope_filter_frame.pack(side=tk.LEFT, padx=10)
+        # Add slope K filter
+        slope_k_frame = tk.Frame(filter_frame, bg="#DCDAD5")
+        slope_k_frame.pack(side=tk.LEFT, padx=10)
+        slope_k_label = tk.Label(slope_k_frame, text="Slope K", bg="#DCDAD5", fg="black", font=("Arial", 11))
+        slope_k_label.pack(side=tk.LEFT, padx=2)
+        self.slope_k_var = tk.StringVar()
+        self.slope_k_var.trace_add("write", lambda n, i, m, sv=self.slope_k_var: self.filter_by_slope_k(sv.get()))
+        slope_k_entry = tk.Entry(slope_k_frame, textvariable=self.slope_k_var, width=5, bg="white", fg="black")
+        slope_k_entry.pack(side=tk.LEFT, padx=2)
+        ToolTip(slope_k_entry, "Filter by slope K: positive > threshold, negative < threshold")
         
-        slope_label = tk.Label(slope_filter_frame, text="Slope >", bg="#DCDAD5", fg="black", font=("Arial", 11))
-        slope_label.pack(side=tk.LEFT, padx=2)
-        
-        self.slope_var = tk.StringVar()
-        self.slope_var.trace_add("write", lambda name, index, mode, sv=self.slope_var: self.filter_by_slope(sv.get()))
-        slope_entry = tk.Entry(slope_filter_frame, textvariable=self.slope_var, width=5, 
-                              bg="white", fg="black")
-        slope_entry.pack(side=tk.LEFT, padx=2)
-        ToolTip(slope_entry, "Show rows where abs(slope K) and abs(slope D) exceed this value")
+        # Add slope D filter
+        slope_d_frame = tk.Frame(filter_frame, bg="#DCDAD5")
+        slope_d_frame.pack(side=tk.LEFT, padx=10)
+        slope_d_label = tk.Label(slope_d_frame, text="Slope D", bg="#DCDAD5", fg="black", font=("Arial", 11))
+        slope_d_label.pack(side=tk.LEFT, padx=2)
+        self.slope_d_var = tk.StringVar()
+        self.slope_d_var.trace_add("write", lambda n, i, m, sv=self.slope_d_var: self.filter_by_slope_d(sv.get()))
+        slope_d_entry = tk.Entry(slope_d_frame, textvariable=self.slope_d_var, width=5, bg="white", fg="black")
+        slope_d_entry.pack(side=tk.LEFT, padx=2)
+        ToolTip(slope_d_entry, "Filter by slope D: positive > threshold, negative < threshold")
         
         # Add info label with icon
         info_frame = tk.Frame(button_frame, bg="#f0f0f0")
@@ -313,7 +321,7 @@ class TradingApp:
                                 return s
                             try:
                                 num = float(v)
-                            except:
+                            except Exception:
                                 return s
                             sign = '+' if num >= 0 else '-'
                             return f"{sign}{abs(num):.1f}"
@@ -673,6 +681,82 @@ class TradingApp:
         self.data[sheet] = current_data_for_sheet # Restore original
 
         self.status_var.set(f"Displaying tokens matching '{token_text}' for {sheet.capitalize()}")
+    def filter_by_slope_k(self, slope_threshold):
+        """Filter data based on slope K: positive values > threshold, negative values < threshold"""
+        # Empty input shows all
+        if slope_threshold == "":
+            self.filter_signals("all")
+            return
+        try:
+            thr = float(slope_threshold)
+        except ValueError:
+            return
+        tab = self.notebook.select()
+        if not tab:
+            return
+        sheet = self.notebook.tab(tab, "text").lower()
+        if sheet not in self.data or not isinstance(self.data[sheet], pd.DataFrame):
+            return
+        df_full = self.data[sheet].copy()
+        if thr >= 0:
+            df_to_display = df_full[df_full['slope K'] > thr]
+        else:
+            df_to_display = df_full[df_full['slope K'] < thr]
+        # Also apply slope D filter if set
+        d_val = self.slope_d_var.get()
+        if d_val != "":
+            try:
+                thr_d = float(d_val)
+                if thr_d >= 0:
+                    df_to_display = df_to_display[df_to_display['slope D'] > thr_d]
+                else:
+                    df_to_display = df_to_display[df_to_display['slope D'] < thr_d]
+            except ValueError:
+                pass
+        # Temporarily display filtered data
+        backup = self.data[sheet]
+        self.data[sheet] = df_to_display
+        self.display_data(sheet)
+        self.data[sheet] = backup
+        self.status_var.set(f"Filtering slope K {'>' if thr>=0 else '<'} {thr} for {sheet.capitalize()}")
+    def filter_by_slope_d(self, slope_threshold):
+        """Filter data based on slope D: positive values > threshold, negative values < threshold"""
+        # Empty input shows all
+        if slope_threshold == "":
+            self.filter_signals("all")
+            return
+        try:
+            thr = float(slope_threshold)
+        except ValueError:
+            return
+        tab = self.notebook.select()
+        if not tab:
+            return
+        sheet = self.notebook.tab(tab, "text").lower()
+        if sheet not in self.data or not isinstance(self.data[sheet], pd.DataFrame):
+            return
+        df_full = self.data[sheet].copy()
+        if thr >= 0:
+            df_to_display = df_full[df_full['slope D'] > thr]
+        else:
+            df_to_display = df_full[df_full['slope D'] < thr]
+        # Also apply slope K filter if set
+        k_val = self.slope_k_var.get()
+        if k_val != "":
+            try:
+                thr_k = float(k_val)
+                if thr_k >= 0:
+                    df_to_display = df_to_display[df_to_display['slope K'] > thr_k]
+                else:
+                    df_to_display = df_to_display[df_to_display['slope K'] < thr_k]
+            except ValueError:
+                pass
+        # Temporarily display filtered data
+        backup = self.data[sheet]
+        self.data[sheet] = df_to_display
+        self.display_data(sheet)
+        self.data[sheet] = backup
+        self.status_var.set(f"Filtering slope D {'>' if thr>=0 else '<'} {thr} for {sheet.capitalize()}")
     
     def filter_by_slope(self, slope_threshold):
         """Filter data based on slope K and D thresholds"""
