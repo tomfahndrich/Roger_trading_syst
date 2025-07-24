@@ -187,7 +187,7 @@ class TradingApp:
         token_label.pack(side=tk.LEFT, padx=2)
         
         self.token_var = tk.StringVar()
-        self.token_var.trace_add("write", lambda name, index, mode, sv=self.token_var: self.filter_by_token(sv.get()))
+        self.token_var.trace_add("write", lambda *args: self.apply_all_filters())
         token_entry = tk.Entry(token_search_frame, textvariable=self.token_var, width=10, 
                               bg="white", fg="black")
         token_entry.pack(side=tk.LEFT, padx=2)
@@ -204,7 +204,7 @@ class TradingApp:
         slope_k_label = tk.Label(slope_k_frame, text="Slope K", bg="#DCDAD5", fg="black", font=("Arial", 11))
         slope_k_label.pack(side=tk.LEFT, padx=2)
         self.slope_k_var = tk.StringVar()
-        self.slope_k_var.trace_add("write", lambda n, i, m, sv=self.slope_k_var: self.filter_by_slope_k(sv.get()))
+        self.slope_k_var.trace_add("write", lambda *args: self.apply_all_filters())
         slope_k_entry = tk.Entry(slope_k_frame, textvariable=self.slope_k_var, width=5, bg="white", fg="black")
         slope_k_entry.pack(side=tk.LEFT, padx=2)
         ToolTip(slope_k_entry, "Filter by slope K: positive > threshold, negative < threshold")
@@ -215,11 +215,25 @@ class TradingApp:
         slope_d_label = tk.Label(slope_d_frame, text="Slope D", bg="#DCDAD5", fg="black", font=("Arial", 11))
         slope_d_label.pack(side=tk.LEFT, padx=2)
         self.slope_d_var = tk.StringVar()
-        self.slope_d_var.trace_add("write", lambda n, i, m, sv=self.slope_d_var: self.filter_by_slope_d(sv.get()))
+        self.slope_d_var.trace_add("write", lambda *args: self.apply_all_filters())
         slope_d_entry = tk.Entry(slope_d_frame, textvariable=self.slope_d_var, width=5, bg="white", fg="black")
         slope_d_entry.pack(side=tk.LEFT, padx=2)
         ToolTip(slope_d_entry, "Filter by slope D: positive > threshold, negative < threshold")
+        # Add ADX filter
+        adx_frame = tk.Frame(filter_frame, bg="#DCDAD5")
+        adx_frame.pack(side=tk.LEFT, padx=10)
+        adx_label = tk.Label(adx_frame, text="ADX", bg="#DCDAD5", fg="black", font=("Arial", 11))
+        adx_label.pack(side=tk.LEFT, padx=2)
+        self.adx_var = tk.StringVar()
+        self.adx_var.trace_add("write", lambda *args: self.apply_all_filters())
+        adx_entry = tk.Entry(adx_frame, textvariable=self.adx_var, width=5, bg="white", fg="black")
+        adx_entry.pack(side=tk.LEFT, padx=2)
+        ToolTip(adx_entry, "Filter by ADX: positive > threshold, negative < threshold")
         
+        # Add reset filters button
+        reset_btn = tk.Button(filter_frame, text="🔄 Reset Filters", command=self.reset_filters, bg="#DCDAD5", cursor="hand2")
+        reset_btn.pack(side=tk.LEFT, padx=10)
+        ToolTip(reset_btn, "Clear all filters and show all signals")
         # Add info label with icon
         info_frame = tk.Frame(button_frame, bg="#f0f0f0")
         info_frame.pack(side=tk.RIGHT, padx=10)
@@ -758,6 +772,119 @@ class TradingApp:
         self.data[sheet] = backup
         self.status_var.set(f"Filtering slope D {'>' if thr>=0 else '<'} {thr} for {sheet.capitalize()}")
     
+    def filter_by_adx(self, adx_threshold):
+        """Filter data based on ADX: positive values > threshold, negative values < threshold"""
+        # Empty input shows all
+        if adx_threshold == "":
+            self.filter_signals("all")
+            return
+        try:
+            thr = float(adx_threshold)
+        except ValueError:
+            return
+        tab = self.notebook.select()
+        if not tab:
+            return
+        sheet = self.notebook.tab(tab, "text").lower()
+        if sheet not in self.data or not isinstance(self.data[sheet], pd.DataFrame):
+            return
+        df_full = self.data[sheet].copy()
+        # Convert ADX strings to numeric
+        adx_vals = pd.to_numeric(df_full['ADX'], errors='coerce')
+        if thr >= 0:
+            df_filtered = df_full[adx_vals > thr]
+        else:
+            df_filtered = df_full[adx_vals < thr]
+        # Also apply slope K filter if set
+        k_val = self.slope_k_var.get()
+        if k_val != "":
+            try:
+                thr_k = float(k_val)
+                slope_k_vals = pd.to_numeric(df_filtered['slope K'], errors='coerce')
+                if thr_k >= 0:
+                    df_filtered = df_filtered[slope_k_vals > thr_k]
+                else:
+                    df_filtered = df_filtered[slope_k_vals < thr_k]
+            except ValueError:
+                pass
+        # Also apply slope D filter if set
+        d_val = self.slope_d_var.get()
+        if d_val != "":
+            try:
+                thr_d = float(d_val)
+                slope_d_vals = pd.to_numeric(df_filtered['slope D'], errors='coerce')
+                if thr_d >= 0:
+                    df_filtered = df_filtered[slope_d_vals > thr_d]
+                else:
+                    df_filtered = df_filtered[slope_d_vals < thr_d]
+            except ValueError:
+                pass
+        # Display filtered result
+        backup = self.data[sheet]
+        self.data[sheet] = df_filtered
+        self.display_data(sheet)
+        self.data[sheet] = backup
+        self.status_var.set(f"Filtering ADX {'>' if thr>=0 else '<'} {thr} for {sheet.capitalize()}")
+    def apply_all_filters(self):
+        """Apply token, slope K, slope D and ADX filters together."""
+        tab = self.notebook.select()
+        if not tab:
+            return
+        sheet = self.notebook.tab(tab, "text").lower()
+        if sheet not in self.data or not isinstance(self.data[sheet], pd.DataFrame):
+            return
+        df_full = self.data[sheet].copy()
+        # Token filter
+        tok = self.token_var.get().strip().lower()
+        if tok:
+            df_full = df_full[df_full['token'].astype(str).str.lower().str.contains(tok)]
+        # Slope K filter
+        k_val = self.slope_k_var.get().strip()
+        if k_val:
+            try:
+                thr_k = float(k_val)
+                if thr_k >= 0:
+                    df_full = df_full[df_full['slope K'] > thr_k]
+                else:
+                    df_full = df_full[df_full['slope K'] < thr_k]
+            except ValueError:
+                pass
+        # Slope D filter
+        d_val = self.slope_d_var.get().strip()
+        if d_val:
+            try:
+                thr_d = float(d_val)
+                if thr_d >= 0:
+                    df_full = df_full[df_full['slope D'] > thr_d]
+                else:
+                    df_full = df_full[df_full['slope D'] < thr_d]
+            except ValueError:
+                pass
+        # ADX filter
+        adx_val = self.adx_var.get().strip()
+        if adx_val:
+            try:
+                thr_adx = float(adx_val)
+                adx_num = pd.to_numeric(df_full['ADX'], errors='coerce')
+                if thr_adx >= 0:
+                    df_full = df_full[adx_num > thr_adx]
+                else:
+                    df_full = df_full[adx_num < thr_adx]
+            except ValueError:
+                pass
+        # Display combined filters
+        backup = self.data[sheet]
+        self.data[sheet] = df_full
+        self.display_data(sheet)
+        self.data[sheet] = backup
+        self.status_var.set(f"Applied all filters for {sheet.capitalize()}")
+    def reset_filters(self):
+        """Reset all filter inputs and display full data."""
+        self.token_var.set("")
+        self.slope_k_var.set("")
+        self.slope_d_var.set("")
+        self.adx_var.set("")
+        self.apply_all_filters()
     def filter_by_slope(self, slope_threshold):
         """Filter data based on slope K and D thresholds"""
         if not slope_threshold:
