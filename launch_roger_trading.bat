@@ -11,7 +11,7 @@ REM Update the remote tracking information
 git fetch origin Roger2
 
 REM Checkout only specific files from the Roger branch
-git checkout origin/Roger -- trading_gui.py trading_signal_generator.py
+git checkout origin/Roger2 -- trading_gui.py trading_signal_generator.py
 
 echo Updated trading_gui.py and signal_generator.py from branch Roger.
 
