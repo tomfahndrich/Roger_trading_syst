@@ -23,6 +23,17 @@ DMI_PERIOD   = 14  # Classic DMI period
 SLOPE_THRESHOLD = 0.4  # Minimum slope magnitude to consider significant
 ADX_THRESHOLD = 20  # ADX threshold for trend strength
 
+# STALENESS THRESHOLDS
+STALE_DAILY_HOURS = 24
+STALE_WEEKLY_DAYS = 5
+
+# INTRADAY FETCH PRIORITY (interval, period)
+INTRADAY_INTERVALS = [
+    ('5m',  '5d'),
+    ('15m', '10d'),
+    ('1h',  '30d'),  # yfinance also accepts '60m'; we keep '1h' consistent with existing usage
+]
+
 # INDICATOR FUNCTIONS
 def compute_stoch(df, window, k_smooth, d_smooth):
     low_n  = df['Low'].rolling(window).min()
@@ -80,6 +91,79 @@ def signal_from_indicators(df):
             sig = 'Sell'
     return sig
 
+def fetch_latest_intraday_bar(ticker):
+    """Return the most recent intraday OHLC row (as Series) trying decreasing granularity.
+
+    Priority order: 5m -> 15m -> 1h. Returns (row, interval_used) or (None, None) if none.
+    """
+    for interval, period in INTRADAY_INTERVALS:
+        try:
+            intraday_df = ticker.history(period=period, interval=interval)
+        except Exception:
+            continue
+        if intraday_df is not None and not intraday_df.empty:
+            # Drop tz if any
+            if getattr(intraday_df.index, 'tz', None) is not None:
+                intraday_df.index = intraday_df.index.tz_localize(None)
+            last_row = intraday_df.iloc[-1]
+            last_idx = intraday_df.index[-1]
+            # Basic sanity: require Close not NA
+            if pd.notna(last_row.get('Close', np.nan)):
+                return (last_row, last_idx, interval)
+    return (None, None, None)
+
+def maybe_append_fresh_bar(df, timeframe_key, ticker, token):
+    """Append a synthetic fresh bar for stale daily/weekly data.
+
+    Rules:
+    - Daily: if last bar older than 24h, append intraday bar.
+    - Weekly: if last bar older than 5 days, append intraday bar.
+    - Bar uses intraday OHLC (Open/High/Low/Close/Volume) from most granular available interval.
+    - New bar timestamp = intraday bar timestamp.
+    - No modification to existing historical bars; synthetic bar exists only in-memory for this run.
+    - Logging performed when bar appended.
+    """
+    if df.empty:
+        return df  # Nothing to do
+    now = pd.Timestamp.utcnow().tz_localize(None)
+    last_ts = df.index[-1]
+    # Ensure tz naive comparison
+    if getattr(last_ts, 'tz', None) is not None:
+        last_ts = last_ts.tz_localize(None)
+
+    append_needed = False
+    if timeframe_key == 'daily':
+        age_hours = (now - last_ts).total_seconds() / 3600.0
+        if age_hours > STALE_DAILY_HOURS:
+            append_needed = True
+    elif timeframe_key == 'weekly':
+        age_days = (now - last_ts).days + (now - last_ts).seconds / 86400.0
+        if age_days > STALE_WEEKLY_DAYS:
+            append_needed = True
+
+    if not append_needed:
+        return df
+
+    intraday_row, intraday_idx, used_interval = fetch_latest_intraday_bar(ticker)
+    if intraday_row is None:
+        return df  # Could not fetch intraday data; fallback silently
+
+    # Only append if newer timestamp
+    if intraday_idx <= last_ts:
+        return df
+
+    df = df.copy()
+    # Construct a new row dict with OHLC (+ Volume if present)
+    new_data = {}
+    for col in ['Open', 'High', 'Low', 'Close', 'Volume']:
+        if col in intraday_row.index:
+            new_data[col] = intraday_row[col]
+    # Append
+    df.loc[intraday_idx, list(new_data.keys())] = list(new_data.values())
+    df.sort_index(inplace=True)
+    print(f"Appended synthetic {timeframe_key} bar for {token} using {used_interval} data at {intraday_idx} (prev ts {last_ts})")
+    return df
+
 def main():
     # Load tokens from "symbols" sheet in Excel
     symbols_df = pd.read_excel(EXCEL_FILE, sheet_name="symbols")
@@ -106,6 +190,10 @@ def main():
 
             if getattr(df.index, 'tz', None) is not None:
                 df.index = df.index.tz_localize(None)
+
+            # Possibly append a synthetic bar for stale daily/weekly data BEFORE indicator computation
+            if sheet in ('daily', 'weekly'):
+                df = maybe_append_fresh_bar(df, sheet, ticker, token)
 
             df['K'], df['D'] = compute_stoch(
                 df, STOCH_PARAMS['window'],
