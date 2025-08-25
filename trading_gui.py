@@ -278,7 +278,8 @@ class TradingApp:
             tree.tag_configure('buy', background='#e8f5e9')      # Very light green
             tree.tag_configure('sell', background='#ffebee')     # Very light red
             tree.tag_configure('sell+', background='#e57373')    # Red
-             
+            tree.tag_configure('buy-', background='#d3d3d3')  # Light grey for divergent slopes
+            tree.tag_configure('sell-', background='#d3d3d3')  # Light grey for divergent slopes
             # Enable editing the notes column
             tree.bind("<Double-1>", self.on_double_click)
 
@@ -439,6 +440,10 @@ class TradingApp:
                 tags = ('sell',)
             elif sig == 'sell+':
                 tags = ('sell+',)
+            elif sig == 'sell-':
+                tags = ('sell-',)
+            elif sig == 'buy-':
+                tags = ('buy-',)
             
             tree.insert("", "end", values=values_to_insert, tags=tags)
 

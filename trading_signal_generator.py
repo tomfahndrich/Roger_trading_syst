@@ -66,30 +66,6 @@ def compute_dmi(df, period):
         na = pd.Series([pd.NA] * len(df), index=df.index)
         return na, na.copy(), na.copy()
 
-def signal_from_indicators(df):
-    # Use only the last bar's K vs D (not a crossover)
-    k_now   = df['K'].iloc[-1]
-    d_now   = df['D'].iloc[-1]
-    cci_now = df['CCI'].iloc[-1]
-    di_plus = df['+DI'].iloc[-1] if '+DI' in df else pd.NA
-    di_minus= df['-DI'].iloc[-1] if '-DI' in df else pd.NA
-    adx_now = df['ADX'].iloc[-1] if 'ADX' in df else pd.NA
-    slope_k = slope(df['K'])
-    slope_d = slope(df['D'])
-    sig = 'Neutral'
-    # Buy conditions
-    if (k_now > d_now) and (cci_now < -100):
-        if pd.notna(di_plus) and pd.notna(di_minus) and pd.notna(adx_now) and (di_plus >= di_minus and adx_now > ADX_THRESHOLD) and (abs(slope_k) > SLOPE_THRESHOLD and abs(slope_d) > SLOPE_THRESHOLD):
-            sig = 'Buy+'
-        else:
-            sig = 'Buy'
-    # Sell conditions
-    elif (k_now < d_now) and (cci_now > 100):
-        if pd.notna(di_plus) and pd.notna(di_minus) and pd.notna(adx_now) and (di_minus > di_plus and adx_now > ADX_THRESHOLD) and (abs(slope_k) > SLOPE_THRESHOLD and abs(slope_d) > SLOPE_THRESHOLD):
-            sig = 'Sell+'
-        else:
-            sig = 'Sell'
-    return sig
 
 def fetch_latest_intraday_bar(ticker):
     """Return the most recent intraday OHLC row (as Series) trying decreasing granularity.
@@ -218,35 +194,45 @@ def main():
                     'D': latest_d
                 }
 
-            # Determine signal with DMI and slope enhancements
+            # Determine signal with updated logic (divergent / Buy / Buy+ / Sell / Sell+).
             k_now   = ind['K'].iloc[-1]
             d_now   = ind['D'].iloc[-1]
             cci_now = ind['CCI'].iloc[-1]
             di_plus = ind['+DI'].iloc[-1] if '+DI' in ind else pd.NA
             di_minus= ind['-DI'].iloc[-1] if '-DI' in ind else pd.NA
-            adx_now = ind['ADX'].iloc[-1] if 'ADX' in ind else pd.NA
             slope_k = slope(ind['K'])
             slope_d = slope(ind['D'])
+
+            
             sig = 'Neutral'
-            # Buy conditions
             if (k_now > d_now) and (cci_now < -100):
-                if pd.notna(di_plus) and pd.notna(di_minus) and pd.notna(adx_now) and (di_plus >= di_minus and adx_now > 20) and (abs(slope_k) > 0.5 and abs(slope_d) > 0.5):
+                if (slope_k is not None and slope_d is not None) and (slope_k > 0.4 and slope_d > 0.4):
                     sig = 'Buy+'
+                    
+                elif pd.notna(slope_k) and pd.notna(slope_d) and slope_k * slope_d < 0:
+                    sig = 'Buy-'
+                    
                 else:
                     sig = 'Buy'
-            # Sell conditions
             elif (k_now < d_now) and (cci_now > 100):
-                if pd.notna(di_plus) and pd.notna(di_minus) and pd.notna(adx_now) and (di_minus > di_plus and adx_now > 20) and (abs(slope_k) > 0.5 and abs(slope_d) > 0.5):
+                if (slope_k is not None and slope_d is not None) and (slope_k < -0.4 and slope_d < -0.4):
                     sig = 'Sell+'
+                    
+                elif pd.notna(slope_k) and pd.notna(slope_d) and slope_k * slope_d < 0:
+                    sig = 'Sell-'
+                    
                 else:
                     sig = 'Sell'
+
             if sig == 'Neutral':
-                continue
+                continue  # Skip neutral
             else:
                 print(f"Signal for {token} ({sheet}): {sig}")
             
             last_row_data = ind.iloc[-1]
             # Add sign to ADX based on DMI comparison
+            # Preserve signed ADX representation for display/storage (even though ADX not used in + classification now)
+            adx_now = ind['ADX'].iloc[-1] if 'ADX' in ind else pd.NA
             signed_adx = f"+{abs(adx_now):.2f}" if (pd.notna(di_plus) and pd.notna(di_minus) and di_plus >= di_minus) else f"-{abs(adx_now):.2f}"
             signal_entry = {
                 'datetime'   : last_row_data.name,
