@@ -1,14 +1,59 @@
 import os
+import numpy as np
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import pandas as pd
-from trading_signal_generator import main as generate_signals, TIMEFRAMES, EXCEL_FILE
+from trading_signal_generator import main as generate_signals, TIMEFRAMES, EXCEL_FILE, TRADE_COLS
+import threading
+import tempfile
+import shutil
 
 # BASE_COLS from trading_signal_generator.py: ['datetime', 'signal', 'token', 'close price', 'CCI', 'stoch K', 'stoch D', 'slope K', 'slope D', 'ADX']
 BASE_COLS_GUI = ['datetime', 'signal', 'token', 'close price', 'CCI', 'stoch K', 'stoch D', 'slope K', 'slope D', 'ADX']
 # Hidden DMI columns for internal use (not displayed)
 HIDDEN_DMI_COLS = ['+DI', '-DI']
 NOTES_COL_GUI = 'notes'
+TRADE_COLS_GUI = TRADE_COLS  # Reuse ordering from generator
+ALL_NEW_ORDER_APPEND = TRADE_COLS_GUI
+
+DATA_LOCK = threading.Lock()
+
+def format_decimal(val):
+    if val is None or val == "" or (isinstance(val, float) and pd.isna(val)):
+        return ""
+    try:
+        return f"{float(val):.2f}"
+    except Exception:
+        return ""
+
+def compute_pnl(entry, exit_price, trade_type):
+    """Compute absolute and percent PNL based on trade type.
+
+    Buy:  PNL = Exit - Entry
+          PNL% = (Exit - Entry) / Entry * 100
+    Sell: PNL = Entry - Exit
+          PNL% = (Entry - Exit) / Entry * 100
+    Returns (pnl, pnl_pct) or (None, None) if insufficient data.
+    """
+    try:
+        if trade_type not in ("Buy", "Sell"):
+            return None, None
+        if entry in (None, "") or exit_price in (None, ""):
+            return None, None
+        if pd.isna(entry) or pd.isna(exit_price):
+            return None, None
+        e = float(entry)
+        x = float(exit_price)
+        if trade_type == 'Buy':
+            pnl = x - e
+        else:  # Sell
+            pnl = e - x
+        if e == 0:
+            return pnl, None
+        pnl_pct = (pnl / e) * 100.0
+        return pnl, pnl_pct
+    except Exception:
+        return None, None
 
 # Create a tooltip class for better UI
 class ToolTip:
@@ -51,6 +96,12 @@ COLUMN_WIDTHS = {
     'stoch D': 80,
     'slope K': 80,
     'slope D': 80,
+    'Trade Type': 90,
+    'Entry Price': 100,
+    'Target Exit Price': 120,
+    'Exit Price': 100,
+    'PNL': 80,
+    'PNL %': 80,
     # Trend columns will be added dynamically, default width can be set or handled in display_data
 }
 
@@ -74,13 +125,12 @@ class TradingApp:
         for sheet in TIMEFRAMES:
             other_timeframes = [tf for tf in TIMEFRAMES if tf != sheet]
             trend_cols_for_this_sheet = sorted([f'{tf}_trend' for tf in other_timeframes])
-            current_sheet_columns = BASE_COLS_GUI + HIDDEN_DMI_COLS + trend_cols_for_this_sheet + [NOTES_COL_GUI]
-            
+            current_sheet_columns = BASE_COLS_GUI + HIDDEN_DMI_COLS + trend_cols_for_this_sheet + [NOTES_COL_GUI] + ALL_NEW_ORDER_APPEND
             df = pd.DataFrame(columns=current_sheet_columns)
-            if NOTES_COL_GUI in df.columns:
-                df[NOTES_COL_GUI] = df[NOTES_COL_GUI].astype(str)
-            else: # Should not happen if current_sheet_columns includes NOTES_COL_GUI
-                df[NOTES_COL_GUI] = pd.Series(dtype=str)
+            df[NOTES_COL_GUI] = df[NOTES_COL_GUI].astype(str)
+            for tc in ALL_NEW_ORDER_APPEND:
+                if tc not in df.columns:
+                    df[tc] = ""
             self.data[sheet] = df
             
         # Create menu
@@ -296,7 +346,7 @@ class TradingApp:
             for sheet in TIMEFRAMES:
                 other_timeframes = [tf for tf in TIMEFRAMES if tf != sheet]
                 trend_cols_for_this_sheet = sorted([f'{tf}_trend' for tf in other_timeframes])
-                current_sheet_columns = BASE_COLS_GUI + HIDDEN_DMI_COLS + trend_cols_for_this_sheet + [NOTES_COL_GUI]
+                current_sheet_columns = BASE_COLS_GUI + HIDDEN_DMI_COLS + trend_cols_for_this_sheet + [NOTES_COL_GUI] + ALL_NEW_ORDER_APPEND
                 df = pd.DataFrame(columns=current_sheet_columns)
                 df[NOTES_COL_GUI] = df[NOTES_COL_GUI].astype(str) # Ensure notes column is string
                 self.data[sheet] = df
@@ -311,7 +361,7 @@ class TradingApp:
                         other_timeframes = [tf for tf in TIMEFRAMES if tf != sheet_name_from_excel]
                         trend_cols_for_this_sheet = sorted([f'{tf}_trend' for tf in other_timeframes])
                         # Include hidden DMI columns in loaded data
-                        expected_cols = BASE_COLS_GUI + HIDDEN_DMI_COLS + trend_cols_for_this_sheet + [NOTES_COL_GUI]
+                        expected_cols = BASE_COLS_GUI + HIDDEN_DMI_COLS + trend_cols_for_this_sheet + [NOTES_COL_GUI] + ALL_NEW_ORDER_APPEND
                         
                         # Create a new DataFrame with expected columns
                         df_structured = pd.DataFrame(columns=expected_cols)
@@ -341,6 +391,12 @@ class TradingApp:
                             sign = '+' if num >= 0 else '-'
                             return f"{sign}{abs(num):.1f}"
                         df_structured['ADX'] = df_structured['ADX'].apply(_add_sign_to_adx)
+                        # Ensure trade cols exist
+                        for tc in ALL_NEW_ORDER_APPEND:
+                            if tc not in df_structured.columns:
+                                df_structured[tc] = ""
+                        # Re-order columns to expected
+                        df_structured = df_structured.reindex(columns=expected_cols)
                         self.data[sheet_name_from_excel] = df_structured
             else:
                 messagebox.showinfo("Info", f"{EXCEL_FILE} not found. Displaying empty tables.")
@@ -357,7 +413,7 @@ class TradingApp:
             for sheet in TIMEFRAMES:
                 other_timeframes = [tf for tf in TIMEFRAMES if tf != sheet]
                 trend_cols_for_this_sheet = sorted([f'{tf}_trend' for tf in other_timeframes])
-                current_sheet_columns = BASE_COLS_GUI + trend_cols_for_this_sheet + [NOTES_COL_GUI]
+                current_sheet_columns = BASE_COLS_GUI + trend_cols_for_this_sheet + [NOTES_COL_GUI] + ALL_NEW_ORDER_APPEND
                 df = pd.DataFrame(columns=current_sheet_columns)
                 df[NOTES_COL_GUI] = df[NOTES_COL_GUI].astype(str)
                 self.data[sheet] = df
@@ -369,142 +425,130 @@ class TradingApp:
             self.display_data(sheet) # Pass the sheet name (key)
 
     def display_data(self, sheet_key):
-        """Display data in the treeview for a specific sheet"""
+        """Display data in the treeview for a specific sheet."""
         tree = self.trees[sheet_key]
-        
-        # Determine all data columns including hidden DMI columns for this specific sheet
         other_timeframes = [tf for tf in TIMEFRAMES if tf != sheet_key]
-        trend_cols_for_this_sheet = sorted([f'{tf}_trend' for tf in other_timeframes])
-        data_columns = BASE_COLS_GUI + HIDDEN_DMI_COLS + trend_cols_for_this_sheet + [NOTES_COL_GUI]
-        # Determine display columns (exclude hidden DMI cols)
+        trend_cols = sorted([f'{tf}_trend' for tf in other_timeframes])
+        data_columns = BASE_COLS_GUI + HIDDEN_DMI_COLS + trend_cols + [NOTES_COL_GUI] + ALL_NEW_ORDER_APPEND
         display_columns = [c for c in data_columns if c not in HIDDEN_DMI_COLS]
 
-        df_display = pd.DataFrame(columns=display_columns)
         if sheet_key in self.data and isinstance(self.data[sheet_key], pd.DataFrame):
             df_from_data = self.data[sheet_key].copy()
-            for col in data_columns:
-                if col not in df_from_data.columns:
-                    df_from_data[col] = pd.NA
-            df_filled = df_from_data.reindex(columns=data_columns, fill_value=pd.NA)
-            # Prepare display DataFrame
-            df_display = df_filled[display_columns].fillna("")
-        
+        else:
+            df_from_data = pd.DataFrame(columns=data_columns)
+
+        for col in data_columns:
+            if col not in df_from_data.columns:
+                df_from_data[col] = pd.NA
+        df_filled = df_from_data.reindex(columns=data_columns, fill_value=pd.NA)
+        df_display = df_filled[display_columns].copy().fillna("")
         if NOTES_COL_GUI in df_display.columns:
             df_display[NOTES_COL_GUI] = df_display[NOTES_COL_GUI].fillna("").astype(str)
-        else:
-            df_display[NOTES_COL_GUI] = ""          
 
-        # Clear previous data
+        # Clear existing rows
         for item in tree.get_children():
             tree.delete(item)
-        
-        # Configure tree columns dynamically
-        tree["columns"] = display_columns
-        tree["show"] = "headings"  # Show only headings, not the default first column
 
+        tree['columns'] = display_columns
+        tree['show'] = 'headings'
         for col in display_columns:
-            tree.heading(col, text=col.replace('_', ' ').title())
+            tree.heading(col, text=col.replace('_',' ').title())
             tree.column(col, width=COLUMN_WIDTHS.get(col, 100), anchor=tk.CENTER)
-         
-        # Insert data with ADX formatting
-        for index, row in df_display.iterrows():
-            values_to_insert = []
+
+        for _, row in df_display.iterrows():
+            row_vals = []
             for col in display_columns:
                 if col == 'ADX':
-                    # Ensure '+' sign for positive ADX values if missing
-                    raw_val = row['ADX']
-                    if pd.isna(raw_val) or raw_val == "":
-                        formatted = ""
+                    raw_val = row[col]
+                    if raw_val in [None, ""]:
+                        row_vals.append("")
                     else:
                         s = str(raw_val)
                         if s.startswith('+') or s.startswith('-'):
-                            formatted = s
+                            row_vals.append(s)
                         else:
                             try:
                                 num = float(s)
-                                formatted = f"{ '+' if num>=0 else '-' }{abs(num):.1f}"
+                                row_vals.append(f"{'+' if num>=0 else '-'}{abs(num):.1f}")
                             except Exception:
-                                formatted = s
-                    values_to_insert.append(formatted)
+                                row_vals.append(s)
+                elif col in ['Entry Price','Target Exit Price','Exit Price','PNL','PNL %']:
+                    v = row[col]
+                    if v is None or v == "" or pd.isna(v):
+                        row_vals.append("")
+                    else:
+                        row_vals.append(format_decimal(v))
                 else:
-                    values_to_insert.append(str(row[col]) if pd.notna(row[col]) else "")
-             
-            # Apply tags for row coloring based on signal
-            sig = str(row['signal']).lower()
-            tags = ()
-            if sig == 'buy+':
-                tags = ('buy+',)
-            elif sig == 'buy':
-                tags = ('buy',)
-            elif sig == 'sell':
-                tags = ('sell',)
-            elif sig == 'sell+':
-                tags = ('sell+',)
-            elif sig == 'sell-':
-                tags = ('sell-',)
-            elif sig == 'buy-':
-                tags = ('buy-',)
-            
-            tree.insert("", "end", values=values_to_insert, tags=tags)
+                    row_vals.append("" if pd.isna(row[col]) else str(row[col]))
 
-        # Update status bar or other UI elements if needed
+            sig = str(row.get('signal','')).lower()
+            tag = ()
+            if sig in ['buy+','buy','sell','sell+','sell-','buy-']:
+                tag = (sig,)
+            tree.insert('', 'end', values=row_vals, tags=tag)
+
         self.status_var.set(f"Displaying data for {sheet_key.capitalize()}")
 
     def save_data_to_excel(self): # Renamed for clarity, this is the main save mechanism
         """Save all data from self.data to the Excel file, preserving other sheets like 'symbols'."""
         try:
-            existing_sheets_data = {}
-            if os.path.exists(EXCEL_FILE):
-                # ...existing code...
-                try:
-                    # Load all sheets to preserve those not managed by self.data
-                    existing_excel = pd.ExcelFile(EXCEL_FILE)
-                    for sheet_name_existing in existing_excel.sheet_names:
-                        if sheet_name_existing not in self.data: # Only load if not in current app data
-                             existing_sheets_data[sheet_name_existing] = pd.read_excel(existing_excel, sheet_name_existing)
-                except Exception as e_read:
-                    print(f"Warning: Could not read existing sheets from {EXCEL_FILE} for preservation: {e_read}")
-                    # Decide if you want to proceed without preserving or stop. Here, we proceed.
+            with DATA_LOCK:
+                preserve = {}
+                if os.path.exists(EXCEL_FILE):
+                    try:
+                        xl = pd.ExcelFile(EXCEL_FILE)
+                        for sn in xl.sheet_names:
+                            if sn not in self.data:
+                                preserve[sn] = pd.read_excel(xl, sn)
+                    except Exception as er:
+                        print("Preserve read warning:", er)
 
-            with pd.ExcelWriter(EXCEL_FILE, engine='openpyxl') as writer:
-                # Save data from the application (self.data)
+                # Recompute PNL columns before saving
                 for sheet_name, df_app in self.data.items():
-                    if df_app is not None and isinstance(df_app, pd.DataFrame):
-                        df_to_save = df_app.copy()
-                        
-                        # Define column order for saving: BASE_COLS_GUI + trends + NOTES_COL_GUI
-                        # Assuming TIMEFRAMES, BASE_COLS_GUI, NOTES_COL_GUI are accessible class/global constants
-                        other_timeframes_save = [tf for tf in TIMEFRAMES if tf != sheet_name] 
-                        trend_cols_for_save = sorted([f'{tf}_trend' for tf in other_timeframes_save])
-                        save_columns_ordered = BASE_COLS_GUI + trend_cols_for_save + [NOTES_COL_GUI]
+                    if isinstance(df_app, pd.DataFrame) and not df_app.empty:
+                        if 'Entry Price' in df_app.columns and 'Exit Price' in df_app.columns:
+                            pnl_vals = []
+                            pnl_pct_vals = []
+                            for _, r in df_app.iterrows():
+                                pnl, pct = compute_pnl(r.get('Entry Price'), r.get('Exit Price'), r.get('Trade Type'))
+                                pnl_vals.append(pnl)
+                                pnl_pct_vals.append(pct)
+                            df_app['PNL'] = pnl_vals
+                            df_app['PNL %'] = pnl_pct_vals
 
-                        # Ensure all necessary columns exist in df_to_save, fill with "" if not
-                        for col in save_columns_ordered:
-                            if col not in df_to_save.columns:
-                                df_to_save[col] = ""
-                        
-                        if NOTES_COL_GUI in df_to_save.columns:
-                            df_to_save[NOTES_COL_GUI] = df_to_save[NOTES_COL_GUI].fillna("").astype(str)
-                        else: # Should be created by the loop above
-                            df_to_save[NOTES_COL_GUI] = ""
-
-                        # Reindex to the desired order for saving
-                        final_save_df = df_to_save.reindex(columns=save_columns_ordered, fill_value="")
-                        
-                        final_save_df.to_excel(writer, sheet_name=sheet_name, index=False)
-
-                # Preserve other sheets from the original Excel file
-                for sheet_name_existing, df_existing in existing_sheets_data.items():
-                    # This condition was: if sheet_name_existing not in self.data:
-                    # It's already handled when populating existing_sheets_data.
-                    # Just write all collected existing sheets.
-                    df_existing.to_excel(writer, sheet_name=sheet_name_existing, index=False)
-            
-            self.status_var.set("Data saved to Excel, non-managed sheets preserved.")
+                temp_fd, temp_path = tempfile.mkstemp(suffix='.xlsx', prefix='tmp_trading_')
+                os.close(temp_fd)
+                try:
+                    with pd.ExcelWriter(temp_path, engine='openpyxl') as writer:
+                        for sheet_name, df_app in self.data.items():
+                            if df_app is not None and isinstance(df_app, pd.DataFrame):
+                                other_tfs = [tf for tf in TIMEFRAMES if tf != sheet_name]
+                                trends = sorted([f'{tf}_trend' for tf in other_tfs])
+                                ordered = BASE_COLS_GUI + trends + [NOTES_COL_GUI] + ALL_NEW_ORDER_APPEND
+                                for col in ordered:
+                                    if col not in df_app.columns:
+                                        df_app[col] = ""
+                                df_save = df_app.reindex(columns=ordered)
+                                if NOTES_COL_GUI in df_save.columns:
+                                    df_save[NOTES_COL_GUI] = df_save[NOTES_COL_GUI].fillna("").astype(str)
+                                # Format numeric columns to two decimals where applicable
+                                for c in ['Entry Price','Target Exit Price','Exit Price','PNL','PNL %']:
+                                    if c in df_save.columns:
+                                        df_save[c] = pd.to_numeric(df_save[c], errors='coerce')
+                                df_save.to_excel(writer, sheet_name=sheet_name, index=False)
+                        for sn, df_pres in preserve.items():
+                            df_pres.to_excel(writer, sheet_name=sn, index=False)
+                    shutil.move(temp_path, EXCEL_FILE)
+                finally:
+                    if os.path.exists(temp_path):
+                        try:
+                            os.remove(temp_path)
+                        except OSError:
+                            pass
+            self.status_var.set("Saved")
         except Exception as e:
-            print(f"Error saving data to Excel: {str(e)}")
-            messagebox.showerror("Save Error", f"Error saving data to Excel: {str(e)}")
-            self.status_var.set(f"Warning: Could not save data to Excel: {str(e)}")
+            messagebox.showerror("Save Error", f"Error: {e}")
+            self.status_var.set("Save failed")
 
     def update_data(self):
         """Update data by running the trading signal generator and reloading from Excel."""
@@ -530,111 +574,124 @@ class TradingApp:
 
     def on_double_click(self, event):
         """Handle double-click on treeview to edit notes."""
-        # Identify the widget, tab, tree, item, and column
         try:
-            # Determine active sheet and tree
             tab_id = self.notebook.select()
             if not tab_id:
-                return # No tab selected
+                return
             sheet = self.notebook.tab(tab_id, "text").lower()
             if sheet not in self.trees:
-                return # Sheet not found
-            tree = self.trees[sheet]
-
-            # Identify column and item
-            column_id = tree.identify_column(event.x) # e.g., '#3'
-            item_id = tree.identify_row(event.y)
-
-            if not item_id or not column_id:
-                return # Click outside of a cell
-
-            column_idx = int(column_id.replace('#', '')) -1 # Treeview columns are 1-indexed
-            
-            # Get the actual column names from the treeview configuration
-            actual_tree_columns = tree["columns"] # This is current_sheet_columns from display_data
-
-            # Ensure we are clicking on the 'notes' column
-            # MODIFIED: Check against actual_tree_columns and NOTES_COL_GUI
-            if column_idx < 0 or column_idx >= len(actual_tree_columns) or actual_tree_columns[column_idx] != NOTES_COL_GUI:
                 return
-        except Exception: # Catch any error during identification (e.g. if click is not on a cell)
+            tree = self.trees[sheet]
+            column_id = tree.identify_column(event.x)
+            item_id = tree.identify_row(event.y)
+            if not item_id or not column_id:
+                return
+            column_idx = int(column_id.replace('#','')) - 1
+            actual_tree_columns = tree["columns"]
+            if column_idx < 0 or column_idx >= len(actual_tree_columns):
+                return
+            target_col = actual_tree_columns[column_idx]
+            editable_cols = [NOTES_COL_GUI, 'Trade Type','Entry Price','Target Exit Price','Exit Price']
+            if target_col not in editable_cols:
+                return
+        except Exception:
             return
 
         current_values = tree.item(item_id, "values")
-        # The column_idx now correctly refers to the position of NOTES_COL_GUI in actual_tree_columns
-        current_note = current_values[column_idx] if column_idx < len(current_values) else ""
-        
-        entry = tk.Entry(tree, relief=tk.SOLID) # Use a solid relief for visibility
-        entry.insert(0, str(current_note)) # Ensure current note is string
-        
-        def save_edit_action(event_obj=None):
-            new_note_value = entry.get()
-            
-            # Update treeview
-            updated_values = list(current_values) # Make a mutable copy
-            if column_idx < len(updated_values):
-                 updated_values[column_idx] = new_note_value
-            tree.item(item_id, values=updated_values)
-            
-            # Update DataFrame (self.data)
+        current_val = current_values[column_idx] if column_idx < len(current_values) else ""
+
+        def locate_df_row(updated_values):
             try:
-                # Get indices of key columns from the actual tree column list
-                # This assumes 'datetime', 'token', 'signal' are always present in tree display
                 dt_idx = actual_tree_columns.index('datetime')
                 tk_idx = actual_tree_columns.index('token')
                 sg_idx = actual_tree_columns.index('signal')
-            except ValueError: # If any key column is not in actual_tree_columns
-                messagebox.showerror("Error", "Key columns (datetime, token, signal) not found in tree display for saving note.")
-                entry.destroy()
-                return
-
-            key_datetime_str = updated_values[dt_idx]
+            except ValueError:
+                return None
+            key_dt = updated_values[dt_idx]
             key_token = updated_values[tk_idx]
             key_signal = updated_values[sg_idx]
-
-            df_sheet = self.data[sheet]
-            
-            # Convert DataFrame datetime to string for comparison if necessary
-            # This needs to be robust based on how datetimes are stored and displayed
-            if pd.api.types.is_datetime64_any_dtype(df_sheet['datetime']):
-                # Attempt to match various possible string formats or convert tree string to datetime
-                # For simplicity, assume tree string format is 'YYYY-MM-DD HH:MM:S'
+            ds = self.data[sheet]
+            if 'datetime' not in ds.columns:
+                return None
+            if pd.api.types.is_datetime64_any_dtype(ds['datetime']):
                 try:
-                    # Convert tree string to datetime object to match DataFrame if it contains datetime objects
-                    key_dt_obj = pd.to_datetime(key_datetime_str)
-                    mask = (df_sheet['datetime'] == key_dt_obj) & \
-                           (df_sheet['token'].astype(str) == str(key_token)) & \
-                           (df_sheet['signal'].astype(str) == str(key_signal))
-                except ValueError: # If key_datetime_str is not a valid datetime string for pd.to_datetime
-                     # Fallback to string comparison if DataFrame datetime is also string or if conversion fails
-                    mask = (df_sheet['datetime'].astype(str) == str(key_datetime_str)) & \
-                           (df_sheet['token'].astype(str) == str(key_token)) & \
-                           (df_sheet['signal'].astype(str) == str(key_signal))
-            else: # If df_sheet['datetime'] is already string
-                mask = (df_sheet['datetime'].astype(str) == str(key_datetime_str)) & \
-                       (df_sheet['token'].astype(str) == str(key_token)) & \
-                       (df_sheet['signal'].astype(str) == str(key_signal))
-
-            matching_indices = df_sheet.index[mask].tolist()
-            
-            if matching_indices:
-                # Update the 'notes' for the first matched row using NOTES_COL_GUI
-                df_sheet.loc[matching_indices[0], NOTES_COL_GUI] = new_note_value
-                self.save_data_to_excel() # Persist change to Excel immediately
+                    key_dt_obj = pd.to_datetime(key_dt)
+                    mask = (ds['datetime'] == key_dt_obj) & (ds['token'].astype(str)==str(key_token)) & (ds['signal'].astype(str)==str(key_signal))
+                except Exception:
+                    mask = (ds['datetime'].astype(str)==str(key_dt)) & (ds['token'].astype(str)==str(key_token)) & (ds['signal'].astype(str)==str(key_signal))
             else:
-                print(f"Warning: Could not find matching row in DataFrame for sheet {sheet} to save note.")
-                print(f"Key: dt='{key_datetime_str}', token='{key_token}', signal='{key_signal}'")
-                messagebox.showwarning("Save Note", "Could not find the exact row to save the note. It might have been changed or removed.")
-            
+                mask = (ds['datetime'].astype(str)==str(key_dt)) & (ds['token'].astype(str)==str(key_token)) & (ds['signal'].astype(str)==str(key_signal))
+            idxs = ds.index[mask].tolist()
+            return idxs[0] if idxs else None
+
+        def commit_update(updated_values, field_name, new_value):
+            row_idx = locate_df_row(updated_values)
+            if row_idx is None:
+                messagebox.showwarning("Update","Row not found for update")
+                return
+            df_sheet = self.data[sheet]
+            if field_name == 'Trade Type':
+                if new_value not in ['Buy','Sell']:
+                    messagebox.showwarning('Validation','Trade Type must be Buy or Sell')
+                    return
+                df_sheet.at[row_idx,'Trade Type'] = new_value
+                close_val = df_sheet.at[row_idx,'close price'] if 'close price' in df_sheet.columns else None
+                try:
+                    if close_val not in [None,""]:
+                        df_sheet.at[row_idx,'Entry Price'] = float(close_val)
+                except Exception:
+                    df_sheet.at[row_idx,'Entry Price'] = ""
+            elif field_name == NOTES_COL_GUI:
+                # Always store notes as string
+                df_sheet.at[row_idx, NOTES_COL_GUI] = str(new_value)
+            elif field_name in ['Entry Price','Target Exit Price','Exit Price']:
+                if new_value == "":
+                    # Use np.nan to keep numeric dtype
+                    df_sheet.at[row_idx, field_name] = np.nan
+                else:
+                    try:
+                        val = float(new_value)
+                        if field_name=='Entry Price' and val < 0:
+                            raise ValueError
+                        df_sheet.at[row_idx, field_name] = val
+                    except Exception:
+                        messagebox.showwarning('Validation', f'Invalid number for {field_name}')
+                        return
+            entry_v = df_sheet.at[row_idx,'Entry Price'] if 'Entry Price' in df_sheet.columns else None
+            exit_v = df_sheet.at[row_idx,'Exit Price'] if 'Exit Price' in df_sheet.columns else None
+            trade_type_v = df_sheet.at[row_idx,'Trade Type'] if 'Trade Type' in df_sheet.columns else None
+            pnl, pct = compute_pnl(entry_v, exit_v, trade_type_v)
+            df_sheet.at[row_idx,'PNL'] = pnl if pnl is not None else np.nan
+            df_sheet.at[row_idx,'PNL %'] = pct if pct is not None else np.nan
+            self.save_data_to_excel()
+            self.display_data(sheet)
+
+        if target_col == 'Trade Type':
+            menu_var = tk.StringVar(value=current_val if current_val in ['Buy','Sell'] else 'Buy')
+            option = tk.OptionMenu(tree, menu_var, 'Buy','Sell', command=lambda sel: (commit_update(list(current_values),'Trade Type', sel), opt.destroy()))
+            opt = option
+            x, y, width, height = tree.bbox(item_id, column_id)
+            if width <=0 or height <=0:
+                return
+            opt.place(x=x, y=y, width=width, height=height)
+            return
+
+        entry = tk.Entry(tree, relief=tk.SOLID)
+        entry.insert(0, str(current_val))
+
+        def save_edit_action(_ev=None):
+            new_val = entry.get().strip()
+            updated_values = list(current_values)
+            if column_idx < len(updated_values):
+                updated_values[column_idx] = new_val
+            commit_update(updated_values, target_col, new_val)
             entry.destroy()
 
         entry.bind("<Return>", save_edit_action)
         entry.bind("<FocusOut>", save_edit_action)
         entry.bind("<Escape>", lambda e: entry.destroy())
-        
         x, y, width, height = tree.bbox(item_id, column_id)
-        # Avoid negative dimension errors
-        if width <= 0 or height <= 0:
+        if width <=0 or height <=0:
             return
         entry.place(x=x, y=y, width=width, height=height)
         entry.focus_set()
@@ -940,7 +997,7 @@ class TradingApp:
                         trend_cols_for_export = sorted([f'{tf}_trend' for tf in other_timeframes_export])
                         
                         # Define the desired column order for export, with NOTES_COL_GUI at the end
-                        export_columns_ordered = BASE_COLS_GUI + trend_cols_for_export + [NOTES_COL_GUI]
+                        export_columns_ordered = BASE_COLS_GUI + trend_cols_for_export + [NOTES_COL_GUI] + ALL_NEW_ORDER_APPEND
 
                         # Ensure all necessary columns exist in df_to_export, fill with "" if not
                         for col in export_columns_ordered:

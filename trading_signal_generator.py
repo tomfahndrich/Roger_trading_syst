@@ -34,6 +34,9 @@ INTRADAY_INTERVALS = [
     ('1h',  '30d'),  # yfinance also accepts '60m'; we keep '1h' consistent with existing usage
 ]
 
+# NEW TRADE / PERFORMANCE COLUMNS (appended after existing columns incl. notes & trends in Excel/GUI)
+TRADE_COLS = ['Trade Type', 'Entry Price', 'Target Exit Price', 'Exit Price', 'PNL', 'PNL %']
+
 # INDICATOR FUNCTIONS
 def compute_stoch(df, window, k_smooth, d_smooth):
     low_n  = df['Low'].rolling(window).min()
@@ -163,19 +166,15 @@ def main():
     for sheet_name, current_signals_list in new_signals.items():
         other_timeframes = [tf for tf in TIMEFRAMES if tf != sheet_name]
         trend_cols_for_this_sheet = sorted([f'{tf}_trend' for tf in other_timeframes])
-        
-        # Maintain notes directly after signal, then base cols (including DMI), then trends
-        desired_cols_ordered = ['datetime', 'signal', NOTES_COL] + [bc for bc in BASE_COLS if bc not in ['datetime', 'signal']] + trend_cols_for_this_sheet
+        desired_cols_ordered = BASE_COLS + trend_cols_for_this_sheet + [NOTES_COL] + TRADE_COLS
 
         new_df = pd.DataFrame(current_signals_list)
-
         for col in desired_cols_ordered:
             if col not in new_df.columns:
                 new_df[col] = ""
         new_df = new_df.reindex(columns=desired_cols_ordered)
 
         old_df = existing_excel_content.get(sheet_name, pd.DataFrame())
-
         for col in desired_cols_ordered:
             if col not in old_df.columns:
                 old_df[col] = ""
@@ -188,38 +187,36 @@ def main():
 
         if not new_df.empty:
             if not old_df.empty and NOTES_COL in old_df.columns and all(k in old_df.columns for k in merge_keys):
-                new_df_for_merge = new_df.drop(columns=[NOTES_COL], errors='ignore')
-                merged_with_old_notes = pd.merge(
+                preserve_cols = [NOTES_COL] + TRADE_COLS
+                new_df_for_merge = new_df.drop(columns=preserve_cols, errors='ignore')
+                merged = pd.merge(
                     new_df_for_merge,
-                    old_df[merge_keys + [NOTES_COL]],
+                    old_df[merge_keys + preserve_cols],
                     on=merge_keys,
                     how='left',
-                    suffixes=('', '_old_note')
+                    suffixes=('', '_old')
                 )
-                if NOTES_COL + '_old_note' in merged_with_old_notes.columns:
-                    merged_with_old_notes[NOTES_COL] = merged_with_old_notes[NOTES_COL + '_old_note']
-                    merged_with_old_notes.drop(columns=[NOTES_COL + '_old_note'], inplace=True)
-                else:
-                     merged_with_old_notes[NOTES_COL] = merged_with_old_notes.get(NOTES_COL, "")
-                merged_with_old_notes[NOTES_COL] = merged_with_old_notes[NOTES_COL].fillna("")
-                
-                for col_from_new in new_df.columns: # Ensure all columns from new_df are present
-                    if col_from_new not in merged_with_old_notes.columns:
-                        merged_with_old_notes[col_from_new] = new_df[col_from_new]
-                combined_df = merged_with_old_notes
+                # Restore preserved columns
+                for pcol in preserve_cols:
+                    old_name = pcol + '_old'
+                    if old_name in merged.columns:
+                        merged[pcol] = merged[old_name]
+                        merged.drop(columns=[old_name], inplace=True)
+                    elif pcol not in merged.columns:
+                        merged[pcol] = ""
+                merged[NOTES_COL] = merged[NOTES_COL].fillna("")
+                combined_df = merged
             else:
                 combined_df = new_df.copy()
 
             if not old_df.empty and all(k in new_df.columns for k in merge_keys) and all(k in old_df.columns for k in merge_keys):
-                # Ensure indices are unique before trying to identify non-overlapping rows
-                new_df_temp_indexed = new_df.drop_duplicates(subset=merge_keys).set_index(merge_keys)
-                old_df_temp_indexed = old_df.drop_duplicates(subset=merge_keys).set_index(merge_keys)
-                
-                old_rows_not_in_new = old_df[~old_df_temp_indexed.index.isin(new_df_temp_indexed.index)]
-                if not old_rows_not_in_new.empty:
-                    combined_df = pd.concat([combined_df, old_rows_not_in_new], ignore_index=True)
-            elif not old_df.empty and combined_df.empty: 
-                 combined_df = old_df.copy()
+                new_idx = new_df.drop_duplicates(subset=merge_keys).set_index(merge_keys)
+                old_idx = old_df.drop_duplicates(subset=merge_keys).set_index(merge_keys)
+                old_only = old_df[~old_idx.index.isin(new_idx.index)]
+                if not old_only.empty:
+                    combined_df = pd.concat([combined_df, old_only], ignore_index=True)
+            elif not old_df.empty and combined_df.empty:
+                combined_df = old_df.copy()
         elif not old_df.empty:
             combined_df = old_df.copy()
         else:
@@ -229,31 +226,29 @@ def main():
         for col in desired_cols_ordered:
             if col not in combined_df.columns:
                 combined_df[col] = ""
-        
         if NOTES_COL in combined_df.columns:
             combined_df[NOTES_COL] = combined_df[NOTES_COL].fillna("").astype(str)
 
         if all(k in combined_df.columns for k in merge_keys) and not combined_df.empty:
             combined_df.drop_duplicates(subset=merge_keys, keep='first', inplace=True)
 
-        num_cols_to_round = ['close price','CCI','stoch K','stoch D','slope K','slope D']
+        num_cols_to_round = ['close price','CCI','stoch K','stoch D','slope K','slope D','Entry Price','Target Exit Price','Exit Price','PNL','PNL %']
         for col in num_cols_to_round:
             if col in combined_df.columns:
                 combined_df[col] = pd.to_numeric(combined_df[col], errors='coerce').round(2)
-        
+
         output_excel_content[sheet_name] = combined_df
 
     with pd.ExcelWriter(EXCEL_FILE, engine='openpyxl') as writer:
         for sheet_name_to_write, df_to_write in output_excel_content.items():
             if df_to_write is not None:
                 if sheet_name_to_write in TIMEFRAMES:
-                    # Ensure DMI columns are included and trends for this sheet
                     trend_cols_for_this_sheet_write = sorted([f'{tf}_trend' for tf in TIMEFRAMES if tf != sheet_name_to_write])
-                    s_final_ordered_cols = ['datetime', 'signal', NOTES_COL] + [bc for bc in BASE_COLS if bc not in ['datetime', 'signal']] + trend_cols_for_this_sheet_write
-                    for col_ensure in s_final_ordered_cols: # Ensure all columns exist before reindex
+                    s_final_ordered_cols = BASE_COLS + trend_cols_for_this_sheet_write + [NOTES_COL] + TRADE_COLS
+                    for col_ensure in s_final_ordered_cols:
                         if col_ensure not in df_to_write.columns:
                             df_to_write[col_ensure] = ""
-                    df_to_write = df_to_write.reindex(columns=s_final_ordered_cols) # Enforce order for data sheets
+                    df_to_write = df_to_write.reindex(columns=s_final_ordered_cols)
                 
                 df_to_write.to_excel(writer, sheet_name=sheet_name_to_write, index=False)
 
