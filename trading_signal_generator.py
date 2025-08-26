@@ -141,139 +141,11 @@ def maybe_append_fresh_bar(df, timeframe_key, ticker, token):
     return df
 
 def main():
-    # Load tokens from "symbols" sheet in Excel
+    # Load tokens and compute signals
     symbols_df = pd.read_excel(EXCEL_FILE, sheet_name="symbols")
-    # Extract the 'Symbols' column, dropna to ignore empty cells, and convert to string
     tokens = symbols_df["Symbols"].dropna().astype(str).tolist()
 
-    new_signals = {tf: [] for tf in TIMEFRAMES} # Holds list of dicts for each timeframe
-    all_latest_k_d_values_for_tokens = {} # Stores latest K/D for all token/timeframe pairs
-
-    # Phase 1: Calculate basic signals and store latest K/D for all token/timeframes
-    for token in tokens:
-        if token not in all_latest_k_d_values_for_tokens:
-            all_latest_k_d_values_for_tokens[token] = {}
-        ticker = yf.Ticker(token)
-        for sheet, cfg in TIMEFRAMES.items(): # sheet is the timeframe key e.g. 'daily'
-            try:
-                df = ticker.history(period=cfg['period'], interval=cfg['interval'])
-            except Exception as e:
-                print(f"Error fetching data for {token} ({sheet}): {e}")
-                continue
-            if df.empty:
-                print(f"Warning: No data for {token} ({sheet})")
-                continue
-
-            if getattr(df.index, 'tz', None) is not None:
-                df.index = df.index.tz_localize(None)
-
-            # Possibly append a synthetic bar for stale daily/weekly data BEFORE indicator computation
-            if sheet in ('daily', 'weekly'):
-                df = maybe_append_fresh_bar(df, sheet, ticker, token)
-
-            df['K'], df['D'] = compute_stoch(
-                df, STOCH_PARAMS['window'],
-                STOCH_PARAMS['k_smooth'],
-                STOCH_PARAMS['d_smooth']
-            )
-            df['CCI'] = compute_cci(df, CCI_PERIOD)
-            # Compute DMI indicators
-            df['+DI'], df['-DI'], df['ADX'] = compute_dmi(df, DMI_PERIOD)
-
-            ind = df.dropna(subset=['K','D','CCI'])
-            if ind.empty:
-                print(f"Warning: No valid indicators for {token} ({sheet}) after dropna")
-                continue
-
-            # Store latest K/D for this token/timeframe
-            latest_k = ind['K'].iloc[-1]
-            latest_d = ind['D'].iloc[-1]
-            if pd.notna(latest_k) and pd.notna(latest_d):
-                all_latest_k_d_values_for_tokens[token][sheet] = {
-                    'K': latest_k,
-                    'D': latest_d
-                }
-
-            # Determine signal with updated logic (divergent / Buy / Buy+ / Sell / Sell+).
-            k_now   = ind['K'].iloc[-1]
-            d_now   = ind['D'].iloc[-1]
-            cci_now = ind['CCI'].iloc[-1]
-            di_plus = ind['+DI'].iloc[-1] if '+DI' in ind else pd.NA
-            di_minus= ind['-DI'].iloc[-1] if '-DI' in ind else pd.NA
-            slope_k = slope(ind['K'])
-            slope_d = slope(ind['D'])
-
-            
-            sig = 'Neutral'
-            if (k_now > d_now) and (cci_now < -100):
-                if (slope_k is not None and slope_d is not None) and (slope_k > 0.4 and slope_d > 0.4):
-                    sig = 'Buy+'
-                    
-                elif pd.notna(slope_k) and pd.notna(slope_d) and slope_k * slope_d < 0:
-                    sig = 'Buy-'
-                    
-                else:
-                    sig = 'Buy'
-            elif (k_now < d_now) and (cci_now > 100):
-                if (slope_k is not None and slope_d is not None) and (slope_k < -0.4 and slope_d < -0.4):
-                    sig = 'Sell+'
-                    
-                elif pd.notna(slope_k) and pd.notna(slope_d) and slope_k * slope_d < 0:
-                    sig = 'Sell-'
-                    
-                else:
-                    sig = 'Sell'
-
-            if sig == 'Neutral':
-                continue  # Skip neutral
-            else:
-                print(f"Signal for {token} ({sheet}): {sig}")
-            
-            last_row_data = ind.iloc[-1]
-            # Add sign to ADX based on DMI comparison
-            # Preserve signed ADX representation for display/storage (even though ADX not used in + classification now)
-            adx_now = ind['ADX'].iloc[-1] if 'ADX' in ind else pd.NA
-            signed_adx = f"+{abs(adx_now):.2f}" if (pd.notna(di_plus) and pd.notna(di_minus) and di_plus >= di_minus) else f"-{abs(adx_now):.2f}"
-            signal_entry = {
-                'datetime'   : last_row_data.name,
-                'signal'     : sig,
-                'token'      : token,
-                'close price': last_row_data['Close'],
-                'CCI'        : last_row_data['CCI'],
-                'stoch K'    : last_row_data['K'],
-                'stoch D'    : last_row_data['D'],
-                'slope K'    : slope_k,
-                'slope D'    : slope_d,
-                '+DI'        : di_plus,
-                '-DI'        : di_minus,
-                'ADX'        : signed_adx,
-            }
-            new_signals[sheet].append(signal_entry)
-
-    # Phase 2: Enrich signals with inter-timeframe trends using all_latest_k_d_values_for_tokens
-    for tf_key_enrich, signals_list_enrich in new_signals.items(): # Iterate Buy/Sell signals
-        for signal_data_enrich in signals_list_enrich: 
-            current_token = signal_data_enrich['token']
-            for other_tf in TIMEFRAMES.keys():
-                if other_tf == tf_key_enrich: # Don't compare a timeframe with itself
-                    continue 
-                
-                trend_col_name = f'{other_tf}_trend'
-                trend_val = "" 
-
-                # Use the comprehensive all_latest_k_d_values_for_tokens
-                if current_token in all_latest_k_d_values_for_tokens and \
-                   other_tf in all_latest_k_d_values_for_tokens[current_token]:
-                    
-                    other_k_val = all_latest_k_d_values_for_tokens[current_token][other_tf]['K']
-                    other_d_val = all_latest_k_d_values_for_tokens[current_token][other_tf]['D']
-                    
-                    if pd.notna(other_k_val) and pd.notna(other_d_val):
-                        if other_k_val > other_d_val:
-                            trend_val = "up"
-                        elif other_k_val < other_d_val:
-                            trend_val = "down"
-                signal_data_enrich[trend_col_name] = trend_val
+    new_signals, all_latest_k_d_values_for_tokens = generate_signals(tokens)
 
     # Phase 3: Excel Processing (largely same as before, uses enriched new_signals)
     NOTES_COL = 'notes'
@@ -389,3 +261,123 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+def generate_signals(tokens):
+    """Compute signals for provided tokens.
+
+    Returns
+    -------
+    (new_signals, latest_kd)
+        new_signals: dict mapping timeframe -> list of signal dicts
+        latest_kd: nested dict token -> timeframe -> {'K': val, 'D': val}
+    """
+    new_signals = {tf: [] for tf in TIMEFRAMES}
+    all_latest_k_d_values_for_tokens = {}
+
+    for token in tokens:
+        if token not in all_latest_k_d_values_for_tokens:
+            all_latest_k_d_values_for_tokens[token] = {}
+        ticker = yf.Ticker(token)
+        for sheet, cfg in TIMEFRAMES.items():
+            try:
+                df = ticker.history(period=cfg['period'], interval=cfg['interval'])
+            except Exception as e:
+                print(f"Error fetching data for {token} ({sheet}): {e}")
+                continue
+            if df.empty:
+                print(f"Warning: No data for {token} ({sheet})")
+                continue
+
+            if getattr(df.index, 'tz', None) is not None:
+                df.index = df.index.tz_localize(None)
+
+            if sheet in ('daily', 'weekly'):
+                df = maybe_append_fresh_bar(df, sheet, ticker, token)
+
+            df['K'], df['D'] = compute_stoch(
+                df, STOCH_PARAMS['window'],
+                STOCH_PARAMS['k_smooth'],
+                STOCH_PARAMS['d_smooth']
+            )
+            df['CCI'] = compute_cci(df, CCI_PERIOD)
+            df['+DI'], df['-DI'], df['ADX'] = compute_dmi(df, DMI_PERIOD)
+
+            ind = df.dropna(subset=['K','D','CCI'])
+            if ind.empty:
+                print(f"Warning: No valid indicators for {token} ({sheet}) after dropna")
+                continue
+
+            latest_k = ind['K'].iloc[-1]
+            latest_d = ind['D'].iloc[-1]
+            if pd.notna(latest_k) and pd.notna(latest_d):
+                all_latest_k_d_values_for_tokens[token][sheet] = {'K': latest_k, 'D': latest_d}
+
+            k_now   = ind['K'].iloc[-1]
+            d_now   = ind['D'].iloc[-1]
+            cci_now = ind['CCI'].iloc[-1]
+            di_plus = ind['+DI'].iloc[-1] if '+DI' in ind else pd.NA
+            di_minus= ind['-DI'].iloc[-1] if '-DI' in ind else pd.NA
+            slope_k = slope(ind['K'])
+            slope_d = slope(ind['D'])
+
+            sig = 'Neutral'
+            if (k_now > d_now) and (cci_now < -100):
+                if (slope_k is not None and slope_d is not None) and (slope_k > 0.4 and slope_d > 0.4):
+                    sig = 'Buy+'
+                elif pd.notna(slope_k) and pd.notna(slope_d) and slope_k * slope_d < 0:
+                    sig = 'Buy-'
+                else:
+                    sig = 'Buy'
+            elif (k_now < d_now) and (cci_now > 100):
+                if (slope_k is not None and slope_d is not None) and (slope_k < -0.4 and slope_d < -0.4):
+                    sig = 'Sell+'
+                elif pd.notna(slope_k) and pd.notna(slope_d) and slope_k * slope_d < 0:
+                    sig = 'Sell-'
+                else:
+                    sig = 'Sell'
+
+            if sig == 'Neutral':
+                continue
+            else:
+                print(f"Signal for {token} ({sheet}): {sig}")
+
+            last_row_data = ind.iloc[-1]
+            adx_now = ind['ADX'].iloc[-1] if 'ADX' in ind else pd.NA
+            signed_adx = f"+{abs(adx_now):.2f}" if (pd.notna(di_plus) and pd.notna(di_minus) and di_plus >= di_minus) else f"-{abs(adx_now):.2f}"
+            signal_entry = {
+                'datetime'   : last_row_data.name,
+                'signal'     : sig,
+                'token'      : token,
+                'close price': last_row_data['Close'],
+                'CCI'        : last_row_data['CCI'],
+                'stoch K'    : last_row_data['K'],
+                'stoch D'    : last_row_data['D'],
+                'slope K'    : slope_k,
+                'slope D'    : slope_d,
+                '+DI'        : di_plus,
+                '-DI'        : di_minus,
+                'ADX'        : signed_adx,
+            }
+            new_signals[sheet].append(signal_entry)
+
+    # Enrich with inter-timeframe trends
+    for tf_key_enrich, signals_list_enrich in new_signals.items():
+        for signal_data_enrich in signals_list_enrich:
+            current_token = signal_data_enrich['token']
+            for other_tf in TIMEFRAMES.keys():
+                if other_tf == tf_key_enrich:
+                    continue
+                trend_col_name = f'{other_tf}_trend'
+                trend_val = ""
+                if current_token in all_latest_k_d_values_for_tokens and \
+                   other_tf in all_latest_k_d_values_for_tokens[current_token]:
+                    other_k_val = all_latest_k_d_values_for_tokens[current_token][other_tf]['K']
+                    other_d_val = all_latest_k_d_values_for_tokens[current_token][other_tf]['D']
+                    if pd.notna(other_k_val) and pd.notna(other_d_val):
+                        if other_k_val > other_d_val:
+                            trend_val = "up"
+                        elif other_k_val < other_d_val:
+                            trend_val = "down"
+                signal_data_enrich[trend_col_name] = trend_val
+
+    return new_signals, all_latest_k_d_values_for_tokens
