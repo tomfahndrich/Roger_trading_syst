@@ -284,45 +284,59 @@ class TradingApp:
         reset_btn = tk.Button(filter_frame, text="🔄 Reset Filters", command=self.reset_filters, bg="#DCDAD5", cursor="hand2")
         reset_btn.pack(side=tk.LEFT, padx=10)
         ToolTip(reset_btn, "Clear all filters and show all signals")
+        # Trade Type checkboxes (Buy / Sell)
+        trade_type_frame = tk.Frame(filter_frame, bg="#DCDAD5")
+        trade_type_frame.pack(side=tk.LEFT, padx=10)
+        trade_type_label = tk.Label(trade_type_frame, text="Trades:", bg="#DCDAD5", fg="black", font=("Arial", 11))
+        trade_type_label.pack(side=tk.LEFT, padx=(0,4))
+        self.trade_buy_var = tk.BooleanVar(value=False)
+        self.trade_sell_var = tk.BooleanVar(value=False)
+        buy_cb = tk.Checkbutton(trade_type_frame, text="Buy", variable=self.trade_buy_var, bg="#DCDAD5", command=self.apply_all_filters)
+        sell_cb = tk.Checkbutton(trade_type_frame, text="Sell", variable=self.trade_sell_var, bg="#DCDAD5", command=self.apply_all_filters)
+        buy_cb.pack(side=tk.LEFT)
+        sell_cb.pack(side=tk.LEFT)
+        ToolTip(buy_cb, "Show only rows where Trade Type is Buy (or with Sell if both checked)")
+        ToolTip(sell_cb, "Show only rows where Trade Type is Sell (or with Buy if both checked)")
+
         # Add info label with icon
         info_frame = tk.Frame(button_frame, bg="#f0f0f0")
         info_frame.pack(side=tk.RIGHT, padx=10)
-        
+
         info_icon = tk.Label(info_frame, text="ℹ️", font=("Arial", 14), bg="#f0f0f0")
         info_icon.pack(side=tk.LEFT)
-        
+
         info_label = tk.Label(info_frame, text="Double-click on notes field to edit", fg="#666", bg="#f0f0f0")
         info_label.pack(side=tk.LEFT, padx=5)
         ToolTip(info_label, "Click on any note field to add or edit notes. Notes are saved automatically to Excel.")
-        
+
         # Create notebook for tabs
         self.notebook = ttk.Notebook(self.root)
         self.notebook.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
-        
+
         # Create tabs and frames
         self.tabs = {}
         self.trees = {}
-        
+
         for sheet in TIMEFRAMES:
             # Create frame for tab
             frame = tk.Frame(self.notebook)
             self.tabs[sheet] = frame
             self.notebook.add(frame, text=sheet.capitalize())
-            
+
             # Create treeview for data
             tree = ttk.Treeview(frame)
             self.trees[sheet] = tree
-            
+
             # Configure scrollbars - use ttk scrollbars for better look
             vsb = ttk.Scrollbar(frame, orient="vertical", command=tree.yview)
             hsb = ttk.Scrollbar(frame, orient="horizontal", command=tree.xview)
             tree.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set)
-            
+
             # Pack scrollbars and tree
             vsb.pack(side=tk.RIGHT, fill=tk.Y)
             hsb.pack(side=tk.BOTTOM, fill=tk.X)
             tree.pack(fill=tk.BOTH, expand=True)
-            
+
             # Configure tags for Buy+/Buy/Sell/Sell+ colors
             tree.tag_configure('buy+', background='#388e3c')     # Green
             tree.tag_configure('buy', background='#e8f5e9')      # Very light green
@@ -934,6 +948,17 @@ class TradingApp:
                     df_full = df_full[adx_num < thr_adx]
             except ValueError:
                 pass
+        # Trade Type checkbox filters
+        if hasattr(self, 'trade_buy_var') and hasattr(self, 'trade_sell_var') and 'Trade Type' in df_full.columns:
+            buy_checked = self.trade_buy_var.get()
+            sell_checked = self.trade_sell_var.get()
+            if buy_checked and not sell_checked:
+                df_full = df_full[df_full['Trade Type'].astype(str) == 'Buy']
+            elif sell_checked and not buy_checked:
+                df_full = df_full[df_full['Trade Type'].astype(str) == 'Sell']
+            elif buy_checked and sell_checked:
+                df_full = df_full[df_full['Trade Type'].astype(str).isin(['Buy','Sell'])]
+            # else: neither checked -> no filter (show all, including blanks)
         # Display combined filters
         backup = self.data[sheet]
         self.data[sheet] = df_full
@@ -946,6 +971,10 @@ class TradingApp:
         self.slope_k_var.set("")
         self.slope_d_var.set("")
         self.adx_var.set("")
+        if hasattr(self, 'trade_buy_var'):
+            self.trade_buy_var.set(False)
+        if hasattr(self, 'trade_sell_var'):
+            self.trade_sell_var.set(False)
         self.apply_all_filters()
     def filter_by_slope(self, slope_threshold):
         """Filter data based on slope K and D thresholds"""
