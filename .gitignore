@@ -1,4 +1,13 @@
 # Ignore script file
 update_watchlist.py
 test_data_fetching.ipynb
-trading_synthesis.xslx
+trading_synthesis.xlsx
+
+# Python cache / compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Temporary files
+*.tmp
+*.log
