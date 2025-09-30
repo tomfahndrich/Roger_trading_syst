@@ -59,6 +59,39 @@ def slope(series):
     x = np.arange(len(y))
     return np.polyfit(x, y, 1)[0]
 
+def recent_stoch_crossover(ind_df, lookback=4):
+    """Return True if a stochastic K/D crossover occurred within the *prior* `lookback` periods.
+
+    Definition / Assumptions:
+    - We evaluate ONLY the `lookback` bars immediately *before* the latest bar (where signal is computed).
+      Example: with lookback=4 we examine indices [-5:-1] relative to the final row.
+    - A crossover is detected if (K-D) changes sign between any two consecutive bars in that window.
+    - All K & D values in the window must be non-NA; otherwise we return False (no CROSS classification fallback).
+    - Direction of the cross (bullish/bearish) does not matter for the CROSS label.
+    """
+    if ind_df is None or ind_df.empty:
+        return False
+    if len(ind_df) < lookback + 1:  # need at least lookback prior bars + current bar
+        return False
+    # Slice prior window (exclude last bar where primary signal condition is checked)
+    prior_window = ind_df.iloc[-(lookback+1):-1]
+    if prior_window[['K','D']].isna().any().any():
+        return False
+    diff = prior_window['K'] - prior_window['D']
+    # Iterate consecutive pairs for sign change (exclude zeros neutrality ambiguity)
+    prev = None
+    for val in diff.values:
+        if prev is not None:
+            # Treat zero as tiny epsilon to avoid missing direct equality then flip
+            if prev == 0:
+                prev = 1e-9
+            if val == 0:
+                val = -1e-9 if prev > 0 else 1e-9
+            if prev * val < 0:
+                return True
+        prev = val
+    return False
+
 def compute_dmi(df, period):
     """Compute +DI, -DI, and ADX using Wilder's smoothing."""
     try:
@@ -316,6 +349,7 @@ def generate_signals(tokens):
             slope_d = slope(ind['D'])
 
             sig = 'Neutral'
+            # --- Determine base directional signal (Buy / Sell variants) ---
             if (k_now > d_now) and (cci_now < -100):
                 if (slope_k is not None and slope_d is not None) and (slope_k > 0.4 and slope_d > 0.4):
                     sig = 'Buy+'
@@ -330,6 +364,10 @@ def generate_signals(tokens):
                     sig = 'Sell-'
                 else:
                     sig = 'Sell'
+
+            # --- CROSS override: check for recent stochastic crossover in prior 4 bars ---
+            if sig != 'Neutral' and recent_stoch_crossover(ind, lookback=4):
+                sig = 'CROSS'
 
             if sig == 'Neutral':
                 continue
@@ -376,3 +414,29 @@ def generate_signals(tokens):
                 signal_data_enrich[trend_col_name] = trend_val
 
     return new_signals, all_latest_k_d_values_for_tokens
+
+def classify_signal_json(sig_label):
+    """Return structured JSON-compatible dict for a given signal label including CROSS.
+
+    Order mapping (UI position):
+      Buy+ =1, Buy=2, Buy-=3, CROSS=4, Sell-=5, Sell=6, Sell+=7
+    Unknown labels default to Neutral (excluded by caller typically).
+    """
+    mapping = {
+        'Buy+':   (1, '#388e3c', 'Strong aligned bullish (K>D, CCI oversold, strong positive slopes).'),
+        'Buy':    (2, '#e8f5e9', 'Standard bullish (K>D, CCI oversold).'),
+        'Buy-':   (3, '#d3d3d3', 'Bullish with divergent stochastic slopes.'),
+        'CROSS':  (4, '#FFD580', 'Crossover between stochastic K and D detected in last 4 periods.'),
+        'Sell-':  (5, '#d3d3d3', 'Bearish with divergent stochastic slopes.'),
+        'Sell':   (6, '#ffebee', 'Standard bearish (K<D, CCI overbought).'),
+        'Sell+':  (7, '#e57373', 'Strong aligned bearish (K<D, CCI overbought, strong negative slopes).'),
+    }
+    if sig_label not in mapping:
+        return {}
+    order, color, base_reason = mapping[sig_label]
+    return {
+        'category': sig_label,
+        'color': color,
+        'order': order,
+        'reason': base_reason if sig_label != 'CROSS' else 'Crossover between stochastic K and D curves detected within the last 4 time steps.'
+    }

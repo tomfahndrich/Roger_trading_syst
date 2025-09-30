@@ -344,6 +344,7 @@ class TradingApp:
             tree.tag_configure('sell+', background='#e57373')    # Red
             tree.tag_configure('buy-', background='#d3d3d3')  # Light grey for divergent slopes
             tree.tag_configure('sell-', background='#d3d3d3')  # Light grey for divergent slopes
+            tree.tag_configure('cross', background='#FFD580')  # Light orange for CROSS
             # Enable editing the notes column
             tree.bind("<Double-1>", self.on_double_click)
 
@@ -497,7 +498,7 @@ class TradingApp:
 
             sig = str(row.get('signal','')).lower()
             tag = ()
-            if sig in ['buy+','buy','sell','sell+','sell-','buy-']:
+            if sig in ['buy+','buy','buy-','cross','sell-','sell','sell+']:
                 tag = (sig,)
             tree.insert('', 'end', values=row_vals, tags=tag)
 
