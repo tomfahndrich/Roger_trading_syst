@@ -185,8 +185,8 @@ def main():
 
     # Phase 3: Excel Processing (largely same as before, uses enriched new_signals)
     NOTES_COL = 'notes'
-    # Include DMI columns for storage
-    BASE_COLS = ['datetime', 'signal', 'token', 'close price', 'CCI', 'stoch K', 'stoch D', 'slope K', 'slope D', '+DI', '-DI', 'ADX']
+    # Include DMI columns + crossover flag for storage
+    BASE_COLS = ['datetime', 'signal', 'token', 'close price', 'CCI', 'stoch K', 'stoch D', 'slope K', 'slope D', '+DI', '-DI', 'ADX', 'cross']
 
     try:
         existing_excel_content = pd.read_excel(EXCEL_FILE, sheet_name=None) if os.path.exists(EXCEL_FILE) else {}
@@ -322,15 +322,30 @@ def generate_signals(tokens):
             if sheet in ('daily', 'weekly'):
                 df = maybe_append_fresh_bar(df, sheet, ticker, token)
 
-            df['K'], df['D'] = compute_stoch(
-                df, STOCH_PARAMS['window'],
+            # --- Monthly special rule --------------------------------------------------------
+            # Requirement: For monthly data we must ALWAYS use the OPEN price for:
+            #   1) Indicator computations (avoid using partial / final Close values)
+            #   2) Stored/displayed price in the output structure / Excel
+            # Implementation: build a working copy with Close replaced by Open for ALL rows.
+            if sheet == 'monthly':
+                df_for_calc = df.copy()
+                if 'Open' in df_for_calc.columns:
+                    try:
+                        df_for_calc['Close'] = df_for_calc['Open']
+                    except Exception:
+                        pass
+            else:
+                df_for_calc = df
+
+            df_for_calc['K'], df_for_calc['D'] = compute_stoch(
+                df_for_calc, STOCH_PARAMS['window'],
                 STOCH_PARAMS['k_smooth'],
                 STOCH_PARAMS['d_smooth']
             )
-            df['CCI'] = compute_cci(df, CCI_PERIOD)
-            df['+DI'], df['-DI'], df['ADX'] = compute_dmi(df, DMI_PERIOD)
+            df_for_calc['CCI'] = compute_cci(df_for_calc, CCI_PERIOD)
+            df_for_calc['+DI'], df_for_calc['-DI'], df_for_calc['ADX'] = compute_dmi(df_for_calc, DMI_PERIOD)
 
-            ind = df.dropna(subset=['K','D','CCI'])
+            ind = df_for_calc.dropna(subset=['K','D','CCI'])
             if ind.empty:
                 print(f"Warning: No valid indicators for {token} ({sheet}) after dropna")
                 continue
@@ -365,23 +380,26 @@ def generate_signals(tokens):
                 else:
                     sig = 'Sell'
 
-            # --- CROSS override: check for recent stochastic crossover in prior 4 bars ---
-            if sig != 'Neutral' and recent_stoch_crossover(ind, lookback=4):
-                sig = 'CROSS'
+            # Record crossover flag (prior 4 completed bars) without altering base signal label
+            cross_flag = False
+            if sig != 'Neutral':
+                cross_flag = recent_stoch_crossover(ind, lookback=4)
 
             if sig == 'Neutral':
                 continue
             else:
-                print(f"Signal for {token} ({sheet}): {sig}")
+                print(f"Signal for {token} ({sheet}): {sig} (cross={cross_flag})")
 
             last_row_data = ind.iloc[-1]
             adx_now = ind['ADX'].iloc[-1] if 'ADX' in ind else pd.NA
             signed_adx = f"+{abs(adx_now):.2f}" if (pd.notna(di_plus) and pd.notna(di_minus) and di_plus >= di_minus) else f"-{abs(adx_now):.2f}"
+            # Use OPEN for monthly stored price; others keep Close
+            price_output = last_row_data['Open'] if sheet == 'monthly' else last_row_data['Close']
             signal_entry = {
                 'datetime'   : last_row_data.name,
                 'signal'     : sig,
                 'token'      : token,
-                'close price': last_row_data['Close'],
+                'close price': price_output,
                 'CCI'        : last_row_data['CCI'],
                 'stoch K'    : last_row_data['K'],
                 'stoch D'    : last_row_data['D'],
@@ -390,6 +408,7 @@ def generate_signals(tokens):
                 '+DI'        : di_plus,
                 '-DI'        : di_minus,
                 'ADX'        : signed_adx,
+                'cross'      : cross_flag,
             }
             new_signals[sheet].append(signal_entry)
 
@@ -416,20 +435,20 @@ def generate_signals(tokens):
     return new_signals, all_latest_k_d_values_for_tokens
 
 def classify_signal_json(sig_label):
-    """Return structured JSON-compatible dict for a given signal label including CROSS.
+    """Return structured JSON-compatible dict for a given (unchanged) signal label.
 
-    Order mapping (UI position):
-      Buy+ =1, Buy=2, Buy-=3, CROSS=4, Sell-=5, Sell=6, Sell+=7
-    Unknown labels default to Neutral (excluded by caller typically).
+    Order mapping (UI position maintained without CROSS category introduction):
+      Buy+ =1, Buy=2, Buy-=3, Sell-=4, Sell=5, Sell+=6
+    (Crossover now indicated separately via 'cross' boolean flag, not a category.)
+    Unknown labels return empty dict.
     """
     mapping = {
         'Buy+':   (1, '#388e3c', 'Strong aligned bullish (K>D, CCI oversold, strong positive slopes).'),
         'Buy':    (2, '#e8f5e9', 'Standard bullish (K>D, CCI oversold).'),
         'Buy-':   (3, '#d3d3d3', 'Bullish with divergent stochastic slopes.'),
-        'CROSS':  (4, '#FFD580', 'Crossover between stochastic K and D detected in last 4 periods.'),
-        'Sell-':  (5, '#d3d3d3', 'Bearish with divergent stochastic slopes.'),
-        'Sell':   (6, '#ffebee', 'Standard bearish (K<D, CCI overbought).'),
-        'Sell+':  (7, '#e57373', 'Strong aligned bearish (K<D, CCI overbought, strong negative slopes).'),
+        'Sell-':  (4, '#d3d3d3', 'Bearish with divergent stochastic slopes.'),
+        'Sell':   (5, '#ffebee', 'Standard bearish (K<D, CCI overbought).'),
+        'Sell+':  (6, '#e57373', 'Strong aligned bearish (K<D, CCI overbought, strong negative slopes).'),
     }
     if sig_label not in mapping:
         return {}
@@ -438,5 +457,5 @@ def classify_signal_json(sig_label):
         'category': sig_label,
         'color': color,
         'order': order,
-        'reason': base_reason if sig_label != 'CROSS' else 'Crossover between stochastic K and D curves detected within the last 4 time steps.'
+        'reason': base_reason,
     }

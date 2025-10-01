@@ -10,8 +10,8 @@ import shutil
 
 # BASE_COLS from trading_signal_generator.py: ['datetime', 'signal', 'token', 'close price', 'CCI', 'stoch K', 'stoch D', 'slope K', 'slope D', 'ADX']
 BASE_COLS_GUI = ['datetime', 'signal', 'token', 'close price', 'CCI', 'stoch K', 'stoch D', 'slope K', 'slope D', 'ADX']
-# Hidden DMI columns for internal use (not displayed)
-HIDDEN_DMI_COLS = ['+DI', '-DI']
+# Hidden internal columns (DMI + crossover flag) for internal use (not displayed)
+HIDDEN_DMI_COLS = ['+DI', '-DI', 'cross']
 NOTES_COL_GUI = 'notes'
 TRADE_COLS_GUI = TRADE_COLS  # Reuse ordering from generator
 ALL_NEW_ORDER_APPEND = TRADE_COLS_GUI
@@ -440,18 +440,14 @@ class TradingApp:
             self.display_data(sheet) # Pass the sheet name (key)
 
     def display_data(self, sheet_key):
-        """Display data in the treeview for a specific sheet."""
+        """Display data in the treeview for a specific sheet with crossover highlighting."""
         tree = self.trees[sheet_key]
         other_timeframes = [tf for tf in TIMEFRAMES if tf != sheet_key]
         trend_cols = sorted([f'{tf}_trend' for tf in other_timeframes])
         data_columns = BASE_COLS_GUI + HIDDEN_DMI_COLS + trend_cols + [NOTES_COL_GUI] + ALL_NEW_ORDER_APPEND
         display_columns = [c for c in data_columns if c not in HIDDEN_DMI_COLS]
 
-        if sheet_key in self.data and isinstance(self.data[sheet_key], pd.DataFrame):
-            df_from_data = self.data[sheet_key].copy()
-        else:
-            df_from_data = pd.DataFrame(columns=data_columns)
-
+        df_from_data = self.data.get(sheet_key, pd.DataFrame(columns=data_columns)).copy()
         for col in data_columns:
             if col not in df_from_data.columns:
                 df_from_data[col] = pd.NA
@@ -460,7 +456,7 @@ class TradingApp:
         if NOTES_COL_GUI in df_display.columns:
             df_display[NOTES_COL_GUI] = df_display[NOTES_COL_GUI].fillna("").astype(str)
 
-        # Clear existing rows
+        # Clear rows
         for item in tree.get_children():
             tree.delete(item)
 
@@ -472,9 +468,9 @@ class TradingApp:
 
         for _, row in df_display.iterrows():
             row_vals = []
-            for col in display_columns:
-                if col == 'ADX':
-                    raw_val = row[col]
+            for c in display_columns:
+                if c == 'ADX':
+                    raw_val = row[c]
                     if raw_val in [None, ""]:
                         row_vals.append("")
                     else:
@@ -487,20 +483,37 @@ class TradingApp:
                                 row_vals.append(f"{'+' if num>=0 else '-'}{abs(num):.1f}")
                             except Exception:
                                 row_vals.append(s)
-                elif col in ['Entry Price','Target Exit Price','Exit Price','PNL','PNL %']:
-                    v = row[col]
+                elif c in ['Entry Price','Target Exit Price','Exit Price','PNL','PNL %']:
+                    v = row[c]
                     if v is None or v == "" or pd.isna(v):
                         row_vals.append("")
                     else:
                         row_vals.append(format_decimal(v))
                 else:
-                    row_vals.append("" if pd.isna(row[col]) else str(row[col]))
+                    row_vals.append("" if pd.isna(row[c]) else str(row[c]))
 
             sig = str(row.get('signal','')).lower()
-            tag = ()
-            if sig in ['buy+','buy','buy-','cross','sell-','sell','sell+']:
-                tag = (sig,)
-            tree.insert('', 'end', values=row_vals, tags=tag)
+            base_tag = sig if sig in ['buy+','buy','buy-','sell-','sell','sell+'] else None
+            cross_raw = None
+            if 'cross' in df_filled.columns:
+                try:
+                    cross_raw = df_filled.loc[row.name, 'cross']
+                except Exception:
+                    cross_raw = row.get('cross', '')
+            cross_flag = False
+            if isinstance(cross_raw, (bool, np.bool_)):
+                cross_flag = bool(cross_raw)
+            elif isinstance(cross_raw, (int, float)) and not pd.isna(cross_raw):
+                cross_flag = int(cross_raw) == 1
+            else:
+                cross_flag = str(cross_raw).strip().lower() in ('1','true','yes','y')
+            if cross_flag:
+                tree.insert('', 'end', values=row_vals, tags=('cross',))
+            else:
+                if base_tag:
+                    tree.insert('', 'end', values=row_vals, tags=(base_tag,))
+                else:
+                    tree.insert('', 'end', values=row_vals)
 
         self.status_var.set(f"Displaying data for {sheet_key.capitalize()}")
 
@@ -539,7 +552,7 @@ class TradingApp:
                             if df_app is not None and isinstance(df_app, pd.DataFrame):
                                 other_tfs = [tf for tf in TIMEFRAMES if tf != sheet_name]
                                 trends = sorted([f'{tf}_trend' for tf in other_tfs])
-                                ordered = BASE_COLS_GUI + trends + [NOTES_COL_GUI] + ALL_NEW_ORDER_APPEND
+                                ordered = BASE_COLS_GUI + HIDDEN_DMI_COLS + trends + [NOTES_COL_GUI] + ALL_NEW_ORDER_APPEND
                                 for col in ordered:
                                     if col not in df_app.columns:
                                         df_app[col] = ""
@@ -1027,7 +1040,7 @@ class TradingApp:
                         trend_cols_for_export = sorted([f'{tf}_trend' for tf in other_timeframes_export])
                         
                         # Define the desired column order for export, with NOTES_COL_GUI at the end
-                        export_columns_ordered = BASE_COLS_GUI + trend_cols_for_export + [NOTES_COL_GUI] + ALL_NEW_ORDER_APPEND
+                        export_columns_ordered = BASE_COLS_GUI + HIDDEN_DMI_COLS + trend_cols_for_export + [NOTES_COL_GUI] + ALL_NEW_ORDER_APPEND
 
                         # Ensure all necessary columns exist in df_to_export, fill with "" if not
                         for col in export_columns_ordered:
