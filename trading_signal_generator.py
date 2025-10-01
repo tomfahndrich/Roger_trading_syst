@@ -22,6 +22,7 @@ SLOPE_PERIOD = 10
 DMI_PERIOD   = 14  # Classic DMI period
 SLOPE_THRESHOLD = 0.4  # Minimum slope magnitude to consider significant
 ADX_THRESHOLD = 20  # ADX threshold for trend strength
+LOOKBACK_CROSSOVER = 5  # Lookback periods to check for stochastic crossover
 
 # STALENESS THRESHOLDS
 STALE_DAILY_HOURS = 24
@@ -181,7 +182,7 @@ def main():
     symbols_df = pd.read_excel(EXCEL_FILE, sheet_name="symbols")
     tokens = symbols_df["Symbols"].dropna().astype(str).tolist()
 
-    new_signals, all_latest_k_d_values_for_tokens = generate_signals(tokens)
+    new_signals, all_latest_k_d_values_for_tokens = generate_signals(tokens, lookback_window=LOOKBACK_CROSSOVER)
 
     # Phase 3: Excel Processing (largely same as before, uses enriched new_signals)
     NOTES_COL = 'notes'
@@ -290,7 +291,7 @@ def main():
 if __name__ == "__main__":
     main()
 
-def generate_signals(tokens):
+def generate_signals(tokens, lookback_window=5):
     """Compute signals for provided tokens.
 
     Returns
@@ -383,7 +384,7 @@ def generate_signals(tokens):
             # Record crossover flag (prior 4 completed bars) without altering base signal label
             cross_flag = False
             if sig != 'Neutral':
-                cross_flag = recent_stoch_crossover(ind, lookback=4)
+                cross_flag = recent_stoch_crossover(ind, lookback=lookback_window)
 
             if sig == 'Neutral':
                 continue
