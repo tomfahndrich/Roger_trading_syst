@@ -38,6 +38,27 @@ INTRADAY_INTERVALS = [
 # NEW TRADE / PERFORMANCE COLUMNS (appended after existing columns incl. notes & trends in Excel/GUI)
 TRADE_COLS = ['Trade Type', 'Entry Price', 'Target Exit Price', 'Exit Price', 'PNL', 'PNL %']
 
+# ------------------------------------------------------------------------------
+# GLOBAL PRICE PRECISION RULE
+# If price < 10 => 4 decimals, else 2 decimals.
+# Applied immediately on data fetch, after synthetic bar addition, prior to signal storage,
+# and before Excel export to ensure consistency system-wide.
+# ------------------------------------------------------------------------------
+def _normalize_price_value(v):
+    try:
+        f = float(v)
+    except Exception:
+        return v
+    if pd.isna(f):
+        return v
+    return round(f + 1e-12, 4) if f < 10 else round(f + 1e-12, 2)
+
+def normalize_price_columns(df, cols=("Open","High","Low","Close")):
+    for c in cols:
+        if c in df.columns:
+            df[c] = df[c].apply(_normalize_price_value)
+    return df
+
 # INDICATOR FUNCTIONS
 def compute_stoch(df, window, k_smooth, d_smooth):
     low_n  = df['Low'].rolling(window).min()
@@ -266,10 +287,16 @@ def main():
         if all(k in combined_df.columns for k in merge_keys) and not combined_df.empty:
             combined_df.drop_duplicates(subset=merge_keys, keep='first', inplace=True)
 
-        num_cols_to_round = ['close price','CCI','stoch K','stoch D','slope K','slope D','Entry Price','Target Exit Price','Exit Price','PNL','PNL %']
+        # Only round indicator / PnL metrics; price fields already normalized by global precision rule.
+        num_cols_to_round = ['CCI','stoch K','stoch D','slope K','slope D','PNL','PNL %']
         for col in num_cols_to_round:
             if col in combined_df.columns:
                 combined_df[col] = pd.to_numeric(combined_df[col], errors='coerce').round(2)
+
+        # Apply global price precision to price-like columns after merges (including user trade fields)
+        for price_col in ['close price','Entry Price','Target Exit Price','Exit Price']:
+            if price_col in combined_df.columns:
+                combined_df[price_col] = combined_df[price_col].apply(_normalize_price_value)
 
         output_excel_content[sheet_name] = combined_df
 
@@ -320,8 +347,12 @@ def generate_signals(tokens, lookback_window=5):
             if getattr(df.index, 'tz', None) is not None:
                 df.index = df.index.tz_localize(None)
 
+            # Apply precision rule immediately on raw fetched data
+            normalize_price_columns(df)
+
             if sheet in ('daily', 'weekly'):
                 df = maybe_append_fresh_bar(df, sheet, ticker, token)
+                normalize_price_columns(df)  # normalize synthetic bar too
 
             # --- Monthly special rule --------------------------------------------------------
             # Requirement: For monthly data we must ALWAYS use the OPEN price for:
@@ -335,6 +366,7 @@ def generate_signals(tokens, lookback_window=5):
                         df_for_calc['Close'] = df_for_calc['Open']
                     except Exception:
                         pass
+                normalize_price_columns(df_for_calc)
             else:
                 df_for_calc = df
 
@@ -396,6 +428,7 @@ def generate_signals(tokens, lookback_window=5):
             signed_adx = f"+{abs(adx_now):.2f}" if (pd.notna(di_plus) and pd.notna(di_minus) and di_plus >= di_minus) else f"-{abs(adx_now):.2f}"
             # Use OPEN for monthly stored price; others keep Close
             price_output = last_row_data['Open'] if sheet == 'monthly' else last_row_data['Close']
+            price_output = _normalize_price_value(price_output)
             signal_entry = {
                 'datetime'   : last_row_data.name,
                 'signal'     : sig,
