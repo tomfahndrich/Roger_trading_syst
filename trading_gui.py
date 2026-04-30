@@ -204,52 +204,67 @@ class TradingApp:
         # Add tooltip to update button
         ToolTip(update_btn, "Fetch the latest trading signals and update the data tables")
         
-        # Add filter buttons
+        # Add filter buttons — two rows for readability
         filter_frame = tk.Frame(button_frame, bg="#DCDAD5")
         filter_frame.pack(side=tk.LEFT, padx=20)
-        
-        filter_label = tk.Label(filter_frame, text="Quick Filters:", bg="#DCDAD5", fg="black", font=("Arial", 11)) # Changed bg to #DCDAD5
+
+        # Row 1: signal-category quick-filter buttons
+        row1_frame = tk.Frame(filter_frame, bg="#DCDAD5")
+        row1_frame.pack(side=tk.TOP, fill=tk.X, pady=(0, 5))
+
+        filter_label = tk.Label(row1_frame, text="Quick Filters:", bg="#DCDAD5", fg="black", font=("Arial", 11))
         filter_label.pack(side=tk.LEFT, padx=5)
-        
-        all_btn = tk.Button(filter_frame, text="All", command=lambda: self.filter_signals("all"), 
+
+        all_btn = tk.Button(row1_frame, text="All", command=self._show_all,
                            bg="#DCDAD5", width=6, cursor="hand2",
                            relief=tk.FLAT, borderwidth=0, highlightthickness=0, highlightbackground="gray")
         all_btn.pack(side=tk.LEFT, padx=2)
         ToolTip(all_btn, "Show all trading signals")
-        
-        buy_btn = tk.Button(filter_frame, text="Buy", command=lambda: self.filter_signals("buy"), 
+
+        buy_btn = tk.Button(row1_frame, text="Buy", command=lambda: self.filter_signals("buy"),
                            bg="#C8E6C9", width=6, cursor="hand2",
                            relief=tk.FLAT, borderwidth=0, highlightthickness=0, highlightbackground="gray")
         buy_btn.pack(side=tk.LEFT, padx=2)
         ToolTip(buy_btn, "Show only Buy signals")
-        
-        sell_btn = tk.Button(filter_frame, text="Sell", command=lambda: self.filter_signals("sell"), 
+
+        sell_btn = tk.Button(row1_frame, text="Sell", command=lambda: self.filter_signals("sell"),
                             bg="#FFCDD2", width=6, cursor="hand2",
                             relief=tk.FLAT, borderwidth=0, highlightthickness=0, highlightbackground="gray")
         sell_btn.pack(side=tk.LEFT, padx=2)
         ToolTip(sell_btn, "Show only Sell signals")
-        
-        # Add token search field
-        token_search_frame = tk.Frame(filter_frame, bg="#DCDAD5")
+
+        self.cross_only_var = tk.BooleanVar(value=False)
+        self.cross_btn = tk.Button(row1_frame, text="Cross", command=self.toggle_cross_filter,
+                                   bg="#FFD580", width=6, cursor="hand2",
+                                   relief=tk.FLAT, borderwidth=0, highlightthickness=0, highlightbackground="gray")
+        self.cross_btn.pack(side=tk.LEFT, padx=2)
+        ToolTip(self.cross_btn, "Show only signals with a recent K/D crossover (orange rows)")
+
+        # Row 2: text/numeric filters
+        row2_frame = tk.Frame(filter_frame, bg="#DCDAD5")
+        row2_frame.pack(side=tk.TOP, fill=tk.X)
+
+        # Token search
+        token_search_frame = tk.Frame(row2_frame, bg="#DCDAD5")
         token_search_frame.pack(side=tk.LEFT, padx=10)
-        
+
         token_label = tk.Label(token_search_frame, text="Token:", bg="#DCDAD5", fg="black", font=("Arial", 11))
         token_label.pack(side=tk.LEFT, padx=2)
-        
+
         self.token_var = tk.StringVar()
         self.token_var.trace_add("write", lambda *args: self.apply_all_filters())
-        token_entry = tk.Entry(token_search_frame, textvariable=self.token_var, width=10, 
+        token_entry = tk.Entry(token_search_frame, textvariable=self.token_var, width=10,
                               bg="white", fg="black")
         token_entry.pack(side=tk.LEFT, padx=2)
-        
-        clear_btn = tk.Button(token_search_frame, text="✕", command=lambda: self.clear_token_filter(), 
+
+        clear_btn = tk.Button(token_search_frame, text="✕", command=lambda: self.clear_token_filter(),
                              bg="#DCDAD5", width=2, cursor="hand2",
                              relief=tk.FLAT, borderwidth=0, highlightthickness=0)
         clear_btn.pack(side=tk.LEFT, padx=1)
         ToolTip(clear_btn, "Clear token filter")
-        
-        # Add slope K filter
-        slope_k_frame = tk.Frame(filter_frame, bg="#DCDAD5")
+
+        # Slope K filter
+        slope_k_frame = tk.Frame(row2_frame, bg="#DCDAD5")
         slope_k_frame.pack(side=tk.LEFT, padx=10)
         slope_k_label = tk.Label(slope_k_frame, text="Slope K", bg="#DCDAD5", fg="black", font=("Arial", 11))
         slope_k_label.pack(side=tk.LEFT, padx=2)
@@ -258,9 +273,9 @@ class TradingApp:
         slope_k_entry = tk.Entry(slope_k_frame, textvariable=self.slope_k_var, width=5, bg="white", fg="black")
         slope_k_entry.pack(side=tk.LEFT, padx=2)
         ToolTip(slope_k_entry, "Filter by slope K: positive > threshold, negative < threshold")
-        
-        # Add slope D filter
-        slope_d_frame = tk.Frame(filter_frame, bg="#DCDAD5")
+
+        # Slope D filter
+        slope_d_frame = tk.Frame(row2_frame, bg="#DCDAD5")
         slope_d_frame.pack(side=tk.LEFT, padx=10)
         slope_d_label = tk.Label(slope_d_frame, text="Slope D", bg="#DCDAD5", fg="black", font=("Arial", 11))
         slope_d_label.pack(side=tk.LEFT, padx=2)
@@ -269,8 +284,9 @@ class TradingApp:
         slope_d_entry = tk.Entry(slope_d_frame, textvariable=self.slope_d_var, width=5, bg="white", fg="black")
         slope_d_entry.pack(side=tk.LEFT, padx=2)
         ToolTip(slope_d_entry, "Filter by slope D: positive > threshold, negative < threshold")
-        # Add ADX filter
-        adx_frame = tk.Frame(filter_frame, bg="#DCDAD5")
+
+        # ADX filter
+        adx_frame = tk.Frame(row2_frame, bg="#DCDAD5")
         adx_frame.pack(side=tk.LEFT, padx=10)
         adx_label = tk.Label(adx_frame, text="ADX", bg="#DCDAD5", fg="black", font=("Arial", 11))
         adx_label.pack(side=tk.LEFT, padx=2)
@@ -279,13 +295,9 @@ class TradingApp:
         adx_entry = tk.Entry(adx_frame, textvariable=self.adx_var, width=5, bg="white", fg="black")
         adx_entry.pack(side=tk.LEFT, padx=2)
         ToolTip(adx_entry, "Filter by ADX: positive > threshold, negative < threshold")
-        
-        # Add reset filters button
-        reset_btn = tk.Button(filter_frame, text="🔄 Reset Filters", command=self.reset_filters, bg="#DCDAD5", cursor="hand2")
-        reset_btn.pack(side=tk.LEFT, padx=10)
-        ToolTip(reset_btn, "Clear all filters and show all signals")
-        # Trade Type checkboxes (Buy / Sell)
-        trade_type_frame = tk.Frame(filter_frame, bg="#DCDAD5")
+
+        # Trade Type checkboxes
+        trade_type_frame = tk.Frame(row2_frame, bg="#DCDAD5")
         trade_type_frame.pack(side=tk.LEFT, padx=10)
         trade_type_label = tk.Label(trade_type_frame, text="Trades:", bg="#DCDAD5", fg="black", font=("Arial", 11))
         trade_type_label.pack(side=tk.LEFT, padx=(0,4))
@@ -297,6 +309,11 @@ class TradingApp:
         sell_cb.pack(side=tk.LEFT)
         ToolTip(buy_cb, "Show only rows where Trade Type is Buy (or with Sell if both checked)")
         ToolTip(sell_cb, "Show only rows where Trade Type is Sell (or with Buy if both checked)")
+
+        # Reset button
+        reset_btn = tk.Button(row2_frame, text="🔄 Reset Filters", command=self.reset_filters, bg="#DCDAD5", cursor="hand2")
+        reset_btn.pack(side=tk.LEFT, padx=10)
+        ToolTip(reset_btn, "Clear all filters and show all signals")
 
         # Add info label with icon
         info_frame = tk.Frame(button_frame, bg="#f0f0f0")
@@ -972,7 +989,15 @@ class TradingApp:
                 df_full = df_full[df_full['Trade Type'].astype(str) == 'Sell']
             elif buy_checked and sell_checked:
                 df_full = df_full[df_full['Trade Type'].astype(str).isin(['Buy','Sell'])]
-            # else: neither checked -> no filter (show all, including blanks)
+        # Cross filter — show only rows where a recent K/D crossover was detected
+        if self.cross_only_var.get() and 'cross' in df_full.columns:
+            def _is_cross(v):
+                if isinstance(v, (bool, np.bool_)):
+                    return bool(v)
+                if isinstance(v, (int, float)) and not pd.isna(v):
+                    return int(v) == 1
+                return str(v).strip().lower() in ('1', 'true', 'yes', 'y')
+            df_full = df_full[df_full['cross'].apply(_is_cross)]
         # Display combined filters
         backup = self.data[sheet]
         self.data[sheet] = df_full
@@ -989,7 +1014,25 @@ class TradingApp:
             self.trade_buy_var.set(False)
         if hasattr(self, 'trade_sell_var'):
             self.trade_sell_var.set(False)
+        self.cross_only_var.set(False)
+        self.cross_btn.configure(bg="#FFD580", relief=tk.FLAT)
         self.apply_all_filters()
+
+    def toggle_cross_filter(self):
+        """Toggle cross-only filter on/off and update button appearance."""
+        new_val = not self.cross_only_var.get()
+        self.cross_only_var.set(new_val)
+        if new_val:
+            self.cross_btn.configure(bg="#FFA500", relief=tk.SUNKEN)
+        else:
+            self.cross_btn.configure(bg="#FFD580", relief=tk.FLAT)
+        self.apply_all_filters()
+
+    def _show_all(self):
+        """Reset cross filter then show all signals."""
+        self.cross_only_var.set(False)
+        self.cross_btn.configure(bg="#FFD580", relief=tk.FLAT)
+        self.filter_signals("all")
     def filter_by_slope(self, slope_threshold):
         """Filter data based on slope K and D thresholds"""
         if not slope_threshold:
