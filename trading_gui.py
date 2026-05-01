@@ -1,4 +1,5 @@
 import os
+import webbrowser
 import numpy as np
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -84,6 +85,108 @@ class ToolTip:
             self.tooltip_window.destroy()
             self.tooltip_window = None
 
+
+class TokenTooltip:
+    """Tooltip enrichi affiché au survol de la colonne 'token' d'un Treeview."""
+
+    def __init__(self, tree: ttk.Treeview, symbol_info: dict):
+        self.tree = tree
+        self.symbol_info = symbol_info
+        self.tooltip_window = None
+        self.last_item = None
+        self._hide_id = None
+        tree.bind("<Motion>", self.on_motion)
+        tree.bind("<Leave>", self._schedule_hide)
+
+    def on_motion(self, event):
+        cols = list(self.tree["columns"])
+        try:
+            token_col_id = f"#{cols.index('token') + 1}"
+        except ValueError:
+            return
+        col = self.tree.identify_column(event.x)
+        item = self.tree.identify_row(event.y)
+        if col != token_col_id or not item:
+            self._schedule_hide()
+            return
+        if item == self.last_item:
+            return
+        self._cancel_hide()
+        self.last_item = item
+        values = self.tree.item(item, "values")
+        try:
+            token = values[cols.index("token")]
+        except (IndexError, ValueError):
+            return
+        info = self.symbol_info.get(token, {})
+        self._show(token,
+                   info.get("company_name") or "-",
+                   info.get("yf_url") or "",
+                   info.get("source") or "-",
+                   event.x_root + 15, event.y_root + 15)
+
+    def _mouse_over_tooltip(self):
+        """Return True if the mouse pointer is currently inside the tooltip window."""
+        if not self.tooltip_window:
+            return False
+        try:
+            mx = self.tree.winfo_pointerx()
+            my = self.tree.winfo_pointery()
+            wx = self.tooltip_window.winfo_rootx()
+            wy = self.tooltip_window.winfo_rooty()
+            ww = self.tooltip_window.winfo_width()
+            wh = self.tooltip_window.winfo_height()
+            return wx <= mx <= wx + ww and wy <= my <= wy + wh
+        except Exception:
+            return False
+
+    def _schedule_hide(self, event=None):
+        self._cancel_hide()
+        self._hide_id = self.tree.after(400, self._do_hide)
+
+    def _cancel_hide(self):
+        if self._hide_id:
+            self.tree.after_cancel(self._hide_id)
+            self._hide_id = None
+
+    def _do_hide(self):
+        self._hide_id = None
+        if self._mouse_over_tooltip():
+            # Mouse is still over the tooltip — keep checking
+            self._hide_id = self.tree.after(100, self._do_hide)
+            return
+        self.last_item = None
+        if self.tooltip_window:
+            self.tooltip_window.destroy()
+            self.tooltip_window = None
+
+    def _show(self, token, company, yf_url, source, x, y):
+        if self.tooltip_window:
+            self.tooltip_window.destroy()
+            self.tooltip_window = None
+        win = tk.Toplevel(self.tree)
+        win.wm_overrideredirect(True)
+        win.wm_geometry(f"+{x}+{y}")
+        win.configure(background="#FFFFDD")
+        pad = {"padx": 8, "pady": 2, "anchor": "w", "fg": "black"}
+        tk.Label(win, text=f"Symbol:  {token}",  bg="#FFFFDD", font=("Arial", 10, "bold"), **pad).pack(fill="x")
+        tk.Label(win, text=f"Company: {company}", bg="#FFFFDD", font=("Arial", 10), **pad).pack(fill="x")
+        if yf_url:
+            lnk = tk.Label(win, text=f"URL:     {yf_url}", bg="#FFFFDD",
+                           font=("Arial", 10), fg="blue", cursor="hand2", padx=8, pady=2, anchor="w")
+            lnk.pack(fill="x")
+            lnk.bind("<Button-1>", lambda e, u=yf_url: webbrowser.open(u))
+        else:
+            tk.Label(win, text="URL:     -", bg="#FFFFDD", font=("Arial", 10), **pad).pack(fill="x")
+        tk.Label(win, text=f"Source:  {source}", bg="#FFFFDD", font=("Arial", 10),
+                 fg="black", padx=8, pady=2, anchor="w").pack(fill="x", pady=(0, 4))
+        win.update_idletasks()
+        self.tooltip_window = win
+
+    def hide(self, event=None):
+        self._schedule_hide(event)
+
+
 # Define constants
 COLUMN_WIDTHS = {
     'datetime': 150,
@@ -133,9 +236,12 @@ class TradingApp:
                     df[tc] = ""
             self.data[sheet] = df
             
+        # symbol_info: {token: {company_name, yf_url, source}} — populated in load_data()
+        self.symbol_info = {}
+
         # Create menu
         self.create_menu()
-        
+
         # Create main layout
         self.create_widgets()
         
@@ -364,6 +470,7 @@ class TradingApp:
             tree.tag_configure('cross', background='#FFD580')  # Light orange for CROSS
             # Enable editing the notes column
             tree.bind("<Double-1>", self.on_double_click)
+            TokenTooltip(tree, self.symbol_info)
 
         # Add status bar
         self.status_var = tk.StringVar()
@@ -435,9 +542,24 @@ class TradingApp:
                 self.status_var.set(f"{EXCEL_FILE} not found.")
                 # self.data is already initialized with empty structured DataFrames
 
+            # Load symbol metadata for tooltips
+            self.symbol_info.clear()
+            try:
+                sym_df = pd.read_excel(EXCEL_FILE, sheet_name="symbols")
+                for _, row in sym_df.iterrows():
+                    token = str(row.get("Symbols", "") or "").strip()
+                    if token:
+                        self.symbol_info[token] = {
+                            "company_name": str(row.get("Company Name", "") or "").strip(),
+                            "yf_url": str(row.get("Yahoo Finance URL", "") or "").strip(),
+                            "source": str(row.get("Source", "") or "").strip(),
+                        }
+            except Exception:
+                pass
+
             self.display_all_data() # Helper to refresh all tabs
             self.status_var.set("Data loaded successfully")
-            
+
         except Exception as e:
             messagebox.showerror("Error", f"Error loading data: {str(e)}")
             self.status_var.set(f"Error loading data: {str(e)}")
@@ -582,6 +704,10 @@ class TradingApp:
                                         df_save[c] = pd.to_numeric(df_save[c], errors='coerce')
                                 df_save.to_excel(writer, sheet_name=sheet_name, index=False)
                         for sn, df_pres in preserve.items():
+                            if sn == "symbols":
+                                for col in ["Company Name", "Yahoo Finance URL", "Source"]:
+                                    if col not in df_pres.columns:
+                                        df_pres[col] = ""
                             df_pres.to_excel(writer, sheet_name=sn, index=False)
                     shutil.move(temp_path, EXCEL_FILE)
                 finally:
