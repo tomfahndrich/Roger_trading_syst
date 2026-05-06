@@ -113,3 +113,64 @@ class TestArgparse:
     def test_custom_source_accepted(self):
         args = self._parse(["input.xlsx", "--source", "manual"])
         assert args.source == "manual"
+
+
+class TestMainModeRouting:
+
+    def _run_main_with_temp_excel(self, input_data: list, extra_args: list) -> pd.DataFrame:
+        import os
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            input_path = f.name
+        with tempfile.NamedTemporaryFile(suffix=".xlsx", delete=False) as f:
+            output_path = f.name
+
+        pd.DataFrame(input_data, columns=["Input"]).to_excel(input_path, index=False)
+
+        import sys
+        argv_backup = sys.argv[:]
+        sys.argv = ["symbols_finder.py", input_path, "--output", output_path] + extra_args
+        try:
+            sf.main()
+        finally:
+            sys.argv = argv_backup
+            os.unlink(input_path)
+
+        result = pd.read_excel(output_path)
+        os.unlink(output_path)
+        return result
+
+    def test_symbol_mode_calls_lookup_not_search(self):
+        with patch("symbols_finder.lookup_info_for_symbol", return_value=("Apple Inc.", "info_ok:EQUITY")) as mock_lookup, \
+             patch("symbols_finder.best_symbol_for_company") as mock_search:
+            self._run_main_with_temp_excel(["AAPL", "MSFT"], ["--mode", "symbol"])
+
+        assert mock_lookup.call_count == 2
+        mock_search.assert_not_called()
+
+    def test_symbol_mode_output_has_correct_columns(self):
+        with patch("symbols_finder.lookup_info_for_symbol", return_value=("Apple Inc.", "info_ok:EQUITY")):
+            df = self._run_main_with_temp_excel(["AAPL"], ["--mode", "symbol"])
+
+        assert list(df.columns) == ["Symbol", "Company Name", "Yahoo Finance URL", "Source"]
+
+    def test_symbol_mode_symbol_preserved_from_input(self):
+        with patch("symbols_finder.lookup_info_for_symbol", return_value=("Apple Inc.", "info_ok:EQUITY")):
+            df = self._run_main_with_temp_excel(["AAPL"], ["--mode", "symbol"])
+
+        assert df.iloc[0]["Symbol"] == "AAPL"
+        assert df.iloc[0]["Company Name"] == "Apple Inc."
+        assert df.iloc[0]["Yahoo Finance URL"] == "https://finance.yahoo.com/quote/AAPL/"
+
+    def test_name_mode_still_calls_best_symbol_for_company(self):
+        with patch("symbols_finder.best_symbol_for_company", return_value=("AAPL", "Apple Inc.", "picked:EQUITY:Apple Inc.")) as mock_search, \
+             patch("symbols_finder.lookup_info_for_symbol") as mock_lookup:
+            self._run_main_with_temp_excel(["Apple Inc."], ["--mode", "name"])
+
+        mock_search.assert_called_once()
+        mock_lookup.assert_not_called()
+
+    def test_source_arg_written_to_source_column(self):
+        with patch("symbols_finder.lookup_info_for_symbol", return_value=("Apple Inc.", "info_ok:EQUITY")):
+            df = self._run_main_with_temp_excel(["AAPL"], ["--mode", "symbol", "--source", "manual"])
+
+        assert df.iloc[0]["Source"] == "manual"

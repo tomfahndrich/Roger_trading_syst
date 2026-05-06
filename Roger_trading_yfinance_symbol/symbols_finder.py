@@ -187,14 +187,22 @@ def main() -> int:
     company_names: List[Optional[str]] = []
     yf_urls: List[str] = []
 
+    total = len(name_series)
     for i, val in enumerate(name_series.tolist(), start=1):
-        company = "" if pd.isna(val) else str(val)
-        sym, name, _ = best_symbol_for_company(company, max_results=args.max_results)
+        raw = "" if pd.isna(val) else str(val).strip()
+
+        if args.mode == "symbol":
+            sym = raw or None
+            name, _ = lookup_info_for_symbol(raw)
+            print(f"[{i}/{total}] {raw} -> {name or '(no name found)'}")
+        else:
+            sym, name, _ = best_symbol_for_company(raw, max_results=args.max_results)
+            print(f"[{i}/{total}] {raw!r} -> {sym or '(not found)'}")
+
         symbols.append(sym)
         company_names.append(name)
         yf_urls.append(f"https://finance.yahoo.com/quote/{sym}/" if sym else "")
 
-        # gentle pacing (unofficial endpoint)
         time.sleep(max(0.0, args.sleep))
 
     df[args.symbol_col_name] = symbols
