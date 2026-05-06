@@ -1,4 +1,5 @@
 import os
+import webbrowser
 import numpy as np
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
@@ -84,6 +85,108 @@ class ToolTip:
             self.tooltip_window.destroy()
             self.tooltip_window = None
 
+
+class TokenTooltip:
+    """Tooltip enrichi affiché au survol de la colonne 'token' d'un Treeview."""
+
+    def __init__(self, tree: ttk.Treeview, symbol_info: dict):
+        self.tree = tree
+        self.symbol_info = symbol_info
+        self.tooltip_window = None
+        self.last_item = None
+        self._hide_id = None
+        tree.bind("<Motion>", self.on_motion)
+        tree.bind("<Leave>", self._schedule_hide)
+
+    def on_motion(self, event):
+        cols = list(self.tree["columns"])
+        try:
+            token_col_id = f"#{cols.index('token') + 1}"
+        except ValueError:
+            return
+        col = self.tree.identify_column(event.x)
+        item = self.tree.identify_row(event.y)
+        if col != token_col_id or not item:
+            self._schedule_hide()
+            return
+        if item == self.last_item:
+            return
+        self._cancel_hide()
+        self.last_item = item
+        values = self.tree.item(item, "values")
+        try:
+            token = values[cols.index("token")]
+        except (IndexError, ValueError):
+            return
+        info = self.symbol_info.get(token, {})
+        self._show(token,
+                   info.get("company_name") or "-",
+                   info.get("yf_url") or "",
+                   info.get("source") or "-",
+                   event.x_root + 15, event.y_root + 15)
+
+    def _mouse_over_tooltip(self):
+        """Return True if the mouse pointer is currently inside the tooltip window."""
+        if not self.tooltip_window:
+            return False
+        try:
+            mx = self.tree.winfo_pointerx()
+            my = self.tree.winfo_pointery()
+            wx = self.tooltip_window.winfo_rootx()
+            wy = self.tooltip_window.winfo_rooty()
+            ww = self.tooltip_window.winfo_width()
+            wh = self.tooltip_window.winfo_height()
+            return wx <= mx <= wx + ww and wy <= my <= wy + wh
+        except Exception:
+            return False
+
+    def _schedule_hide(self, event=None):
+        self._cancel_hide()
+        self._hide_id = self.tree.after(400, self._do_hide)
+
+    def _cancel_hide(self):
+        if self._hide_id:
+            self.tree.after_cancel(self._hide_id)
+            self._hide_id = None
+
+    def _do_hide(self):
+        self._hide_id = None
+        if self._mouse_over_tooltip():
+            # Mouse is still over the tooltip — keep checking
+            self._hide_id = self.tree.after(100, self._do_hide)
+            return
+        self.last_item = None
+        if self.tooltip_window:
+            self.tooltip_window.destroy()
+            self.tooltip_window = None
+
+    def _show(self, token, company, yf_url, source, x, y):
+        if self.tooltip_window:
+            self.tooltip_window.destroy()
+            self.tooltip_window = None
+        win = tk.Toplevel(self.tree)
+        win.wm_overrideredirect(True)
+        win.wm_geometry(f"+{x}+{y}")
+        win.configure(background="#FFFFDD")
+        pad = {"padx": 8, "pady": 2, "anchor": "w", "fg": "black"}
+        tk.Label(win, text=f"Symbol:  {token}",  bg="#FFFFDD", font=("Arial", 10, "bold"), **pad).pack(fill="x")
+        tk.Label(win, text=f"Company: {company}", bg="#FFFFDD", font=("Arial", 10), **pad).pack(fill="x")
+        if yf_url:
+            lnk = tk.Label(win, text=f"URL:     {yf_url}", bg="#FFFFDD",
+                           font=("Arial", 10), fg="blue", cursor="hand2", padx=8, pady=2, anchor="w")
+            lnk.pack(fill="x")
+            lnk.bind("<Button-1>", lambda e, u=yf_url: webbrowser.open(u))
+        else:
+            tk.Label(win, text="URL:     -", bg="#FFFFDD", font=("Arial", 10), **pad).pack(fill="x")
+        tk.Label(win, text=f"Source:  {source}", bg="#FFFFDD", font=("Arial", 10),
+                 fg="black", padx=8, pady=2, anchor="w").pack(fill="x", pady=(0, 4))
+        win.update_idletasks()
+        self.tooltip_window = win
+
+    def hide(self, event=None):
+        self._schedule_hide(event)
+
+
 # Define constants
 COLUMN_WIDTHS = {
     'datetime': 150,
@@ -133,9 +236,12 @@ class TradingApp:
                     df[tc] = ""
             self.data[sheet] = df
             
+        # symbol_info: {token: {company_name, yf_url, source}} — populated in load_data()
+        self.symbol_info = {}
+
         # Create menu
         self.create_menu()
-        
+
         # Create main layout
         self.create_widgets()
         
@@ -204,52 +310,67 @@ class TradingApp:
         # Add tooltip to update button
         ToolTip(update_btn, "Fetch the latest trading signals and update the data tables")
         
-        # Add filter buttons
+        # Add filter buttons — two rows for readability
         filter_frame = tk.Frame(button_frame, bg="#DCDAD5")
         filter_frame.pack(side=tk.LEFT, padx=20)
-        
-        filter_label = tk.Label(filter_frame, text="Quick Filters:", bg="#DCDAD5", fg="black", font=("Arial", 11)) # Changed bg to #DCDAD5
+
+        # Row 1: signal-category quick-filter buttons
+        row1_frame = tk.Frame(filter_frame, bg="#DCDAD5")
+        row1_frame.pack(side=tk.TOP, fill=tk.X, pady=(0, 5))
+
+        filter_label = tk.Label(row1_frame, text="Quick Filters:", bg="#DCDAD5", fg="black", font=("Arial", 11))
         filter_label.pack(side=tk.LEFT, padx=5)
-        
-        all_btn = tk.Button(filter_frame, text="All", command=lambda: self.filter_signals("all"), 
+
+        all_btn = tk.Button(row1_frame, text="All", command=self._show_all,
                            bg="#DCDAD5", width=6, cursor="hand2",
                            relief=tk.FLAT, borderwidth=0, highlightthickness=0, highlightbackground="gray")
         all_btn.pack(side=tk.LEFT, padx=2)
         ToolTip(all_btn, "Show all trading signals")
-        
-        buy_btn = tk.Button(filter_frame, text="Buy", command=lambda: self.filter_signals("buy"), 
+
+        buy_btn = tk.Button(row1_frame, text="Buy", command=lambda: self.filter_signals("buy"),
                            bg="#C8E6C9", width=6, cursor="hand2",
                            relief=tk.FLAT, borderwidth=0, highlightthickness=0, highlightbackground="gray")
         buy_btn.pack(side=tk.LEFT, padx=2)
         ToolTip(buy_btn, "Show only Buy signals")
-        
-        sell_btn = tk.Button(filter_frame, text="Sell", command=lambda: self.filter_signals("sell"), 
+
+        sell_btn = tk.Button(row1_frame, text="Sell", command=lambda: self.filter_signals("sell"),
                             bg="#FFCDD2", width=6, cursor="hand2",
                             relief=tk.FLAT, borderwidth=0, highlightthickness=0, highlightbackground="gray")
         sell_btn.pack(side=tk.LEFT, padx=2)
         ToolTip(sell_btn, "Show only Sell signals")
-        
-        # Add token search field
-        token_search_frame = tk.Frame(filter_frame, bg="#DCDAD5")
+
+        self.cross_only_var = tk.BooleanVar(value=False)
+        self.cross_btn = tk.Button(row1_frame, text="Cross", command=self.toggle_cross_filter,
+                                   bg="#FFD580", width=6, cursor="hand2",
+                                   relief=tk.FLAT, borderwidth=0, highlightthickness=0, highlightbackground="gray")
+        self.cross_btn.pack(side=tk.LEFT, padx=2)
+        ToolTip(self.cross_btn, "Show only signals with a recent K/D crossover (orange rows)")
+
+        # Row 2: text/numeric filters
+        row2_frame = tk.Frame(filter_frame, bg="#DCDAD5")
+        row2_frame.pack(side=tk.TOP, fill=tk.X)
+
+        # Token search
+        token_search_frame = tk.Frame(row2_frame, bg="#DCDAD5")
         token_search_frame.pack(side=tk.LEFT, padx=10)
-        
+
         token_label = tk.Label(token_search_frame, text="Token:", bg="#DCDAD5", fg="black", font=("Arial", 11))
         token_label.pack(side=tk.LEFT, padx=2)
-        
+
         self.token_var = tk.StringVar()
         self.token_var.trace_add("write", lambda *args: self.apply_all_filters())
-        token_entry = tk.Entry(token_search_frame, textvariable=self.token_var, width=10, 
+        token_entry = tk.Entry(token_search_frame, textvariable=self.token_var, width=10,
                               bg="white", fg="black")
         token_entry.pack(side=tk.LEFT, padx=2)
-        
-        clear_btn = tk.Button(token_search_frame, text="✕", command=lambda: self.clear_token_filter(), 
+
+        clear_btn = tk.Button(token_search_frame, text="✕", command=lambda: self.clear_token_filter(),
                              bg="#DCDAD5", width=2, cursor="hand2",
                              relief=tk.FLAT, borderwidth=0, highlightthickness=0)
         clear_btn.pack(side=tk.LEFT, padx=1)
         ToolTip(clear_btn, "Clear token filter")
-        
-        # Add slope K filter
-        slope_k_frame = tk.Frame(filter_frame, bg="#DCDAD5")
+
+        # Slope K filter
+        slope_k_frame = tk.Frame(row2_frame, bg="#DCDAD5")
         slope_k_frame.pack(side=tk.LEFT, padx=10)
         slope_k_label = tk.Label(slope_k_frame, text="Slope K", bg="#DCDAD5", fg="black", font=("Arial", 11))
         slope_k_label.pack(side=tk.LEFT, padx=2)
@@ -258,9 +379,9 @@ class TradingApp:
         slope_k_entry = tk.Entry(slope_k_frame, textvariable=self.slope_k_var, width=5, bg="white", fg="black")
         slope_k_entry.pack(side=tk.LEFT, padx=2)
         ToolTip(slope_k_entry, "Filter by slope K: positive > threshold, negative < threshold")
-        
-        # Add slope D filter
-        slope_d_frame = tk.Frame(filter_frame, bg="#DCDAD5")
+
+        # Slope D filter
+        slope_d_frame = tk.Frame(row2_frame, bg="#DCDAD5")
         slope_d_frame.pack(side=tk.LEFT, padx=10)
         slope_d_label = tk.Label(slope_d_frame, text="Slope D", bg="#DCDAD5", fg="black", font=("Arial", 11))
         slope_d_label.pack(side=tk.LEFT, padx=2)
@@ -269,8 +390,9 @@ class TradingApp:
         slope_d_entry = tk.Entry(slope_d_frame, textvariable=self.slope_d_var, width=5, bg="white", fg="black")
         slope_d_entry.pack(side=tk.LEFT, padx=2)
         ToolTip(slope_d_entry, "Filter by slope D: positive > threshold, negative < threshold")
-        # Add ADX filter
-        adx_frame = tk.Frame(filter_frame, bg="#DCDAD5")
+
+        # ADX filter
+        adx_frame = tk.Frame(row2_frame, bg="#DCDAD5")
         adx_frame.pack(side=tk.LEFT, padx=10)
         adx_label = tk.Label(adx_frame, text="ADX", bg="#DCDAD5", fg="black", font=("Arial", 11))
         adx_label.pack(side=tk.LEFT, padx=2)
@@ -279,13 +401,9 @@ class TradingApp:
         adx_entry = tk.Entry(adx_frame, textvariable=self.adx_var, width=5, bg="white", fg="black")
         adx_entry.pack(side=tk.LEFT, padx=2)
         ToolTip(adx_entry, "Filter by ADX: positive > threshold, negative < threshold")
-        
-        # Add reset filters button
-        reset_btn = tk.Button(filter_frame, text="🔄 Reset Filters", command=self.reset_filters, bg="#DCDAD5", cursor="hand2")
-        reset_btn.pack(side=tk.LEFT, padx=10)
-        ToolTip(reset_btn, "Clear all filters and show all signals")
-        # Trade Type checkboxes (Buy / Sell)
-        trade_type_frame = tk.Frame(filter_frame, bg="#DCDAD5")
+
+        # Trade Type checkboxes
+        trade_type_frame = tk.Frame(row2_frame, bg="#DCDAD5")
         trade_type_frame.pack(side=tk.LEFT, padx=10)
         trade_type_label = tk.Label(trade_type_frame, text="Trades:", bg="#DCDAD5", fg="black", font=("Arial", 11))
         trade_type_label.pack(side=tk.LEFT, padx=(0,4))
@@ -297,6 +415,11 @@ class TradingApp:
         sell_cb.pack(side=tk.LEFT)
         ToolTip(buy_cb, "Show only rows where Trade Type is Buy (or with Sell if both checked)")
         ToolTip(sell_cb, "Show only rows where Trade Type is Sell (or with Buy if both checked)")
+
+        # Reset button
+        reset_btn = tk.Button(row2_frame, text="🔄 Reset Filters", command=self.reset_filters, bg="#DCDAD5", cursor="hand2")
+        reset_btn.pack(side=tk.LEFT, padx=10)
+        ToolTip(reset_btn, "Clear all filters and show all signals")
 
         # Add info label with icon
         info_frame = tk.Frame(button_frame, bg="#f0f0f0")
@@ -347,6 +470,7 @@ class TradingApp:
             tree.tag_configure('cross', background='#FFD580')  # Light orange for CROSS
             # Enable editing the notes column
             tree.bind("<Double-1>", self.on_double_click)
+            TokenTooltip(tree, self.symbol_info)
 
         # Add status bar
         self.status_var = tk.StringVar()
@@ -418,9 +542,24 @@ class TradingApp:
                 self.status_var.set(f"{EXCEL_FILE} not found.")
                 # self.data is already initialized with empty structured DataFrames
 
+            # Load symbol metadata for tooltips
+            self.symbol_info.clear()
+            try:
+                sym_df = pd.read_excel(EXCEL_FILE, sheet_name="symbols")
+                for _, row in sym_df.iterrows():
+                    token = str(row.get("Symbols", "") or "").strip()
+                    if token:
+                        self.symbol_info[token] = {
+                            "company_name": str(row.get("Company Name", "") or "").strip(),
+                            "yf_url": str(row.get("Yahoo Finance URL", "") or "").strip(),
+                            "source": str(row.get("Source", "") or "").strip(),
+                        }
+            except Exception:
+                pass
+
             self.display_all_data() # Helper to refresh all tabs
             self.status_var.set("Data loaded successfully")
-            
+
         except Exception as e:
             messagebox.showerror("Error", f"Error loading data: {str(e)}")
             self.status_var.set(f"Error loading data: {str(e)}")
@@ -565,6 +704,10 @@ class TradingApp:
                                         df_save[c] = pd.to_numeric(df_save[c], errors='coerce')
                                 df_save.to_excel(writer, sheet_name=sheet_name, index=False)
                         for sn, df_pres in preserve.items():
+                            if sn == "symbols":
+                                for col in ["Company Name", "Yahoo Finance URL", "Source"]:
+                                    if col not in df_pres.columns:
+                                        df_pres[col] = ""
                             df_pres.to_excel(writer, sheet_name=sn, index=False)
                     shutil.move(temp_path, EXCEL_FILE)
                 finally:
@@ -972,7 +1115,15 @@ class TradingApp:
                 df_full = df_full[df_full['Trade Type'].astype(str) == 'Sell']
             elif buy_checked and sell_checked:
                 df_full = df_full[df_full['Trade Type'].astype(str).isin(['Buy','Sell'])]
-            # else: neither checked -> no filter (show all, including blanks)
+        # Cross filter — show only rows where a recent K/D crossover was detected
+        if self.cross_only_var.get() and 'cross' in df_full.columns:
+            def _is_cross(v):
+                if isinstance(v, (bool, np.bool_)):
+                    return bool(v)
+                if isinstance(v, (int, float)) and not pd.isna(v):
+                    return int(v) == 1
+                return str(v).strip().lower() in ('1', 'true', 'yes', 'y')
+            df_full = df_full[df_full['cross'].apply(_is_cross)]
         # Display combined filters
         backup = self.data[sheet]
         self.data[sheet] = df_full
@@ -989,7 +1140,25 @@ class TradingApp:
             self.trade_buy_var.set(False)
         if hasattr(self, 'trade_sell_var'):
             self.trade_sell_var.set(False)
+        self.cross_only_var.set(False)
+        self.cross_btn.configure(bg="#FFD580", relief=tk.FLAT)
         self.apply_all_filters()
+
+    def toggle_cross_filter(self):
+        """Toggle cross-only filter on/off and update button appearance."""
+        new_val = not self.cross_only_var.get()
+        self.cross_only_var.set(new_val)
+        if new_val:
+            self.cross_btn.configure(bg="#FFA500", relief=tk.SUNKEN)
+        else:
+            self.cross_btn.configure(bg="#FFD580", relief=tk.FLAT)
+        self.apply_all_filters()
+
+    def _show_all(self):
+        """Reset cross filter then show all signals."""
+        self.cross_only_var.set(False)
+        self.cross_btn.configure(bg="#FFD580", relief=tk.FLAT)
+        self.filter_signals("all")
     def filter_by_slope(self, slope_threshold):
         """Filter data based on slope K and D thresholds"""
         if not slope_threshold:
