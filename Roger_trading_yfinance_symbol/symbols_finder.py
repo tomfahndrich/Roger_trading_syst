@@ -2,8 +2,14 @@
 # -*- coding: utf-8 -*-
 
 """
-Map company names -> most probable Yahoo Finance symbol using yfinance.Search,
-reading from an Excel file and writing the symbol into a second column.
+Two-way Yahoo Finance symbol <-> company name lookup via yfinance.
+
+Modes (--mode):
+  name   (default)  Company name -> best Yahoo Finance symbol via yf.Search
+  symbol            Ticker symbol -> company name via yf.Ticker.info
+
+Both modes read from an Excel column and output a 4-column Excel:
+  Symbol | Company Name | Yahoo Finance URL | Source
 
 Install:
   pip install pandas openpyxl yfinance
@@ -136,7 +142,13 @@ def lookup_info_for_symbol(symbol: str) -> Tuple[Optional[str], str]:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="Add Yahoo Finance symbols to an Excel file based on company names.")
+    ap = argparse.ArgumentParser(
+        description=(
+            "Two-way Yahoo Finance lookup. "
+            "--mode name: company name -> symbol. "
+            "--mode symbol: symbol -> company name."
+        )
+    )
     ap.add_argument("input_xlsx", help="Path to input Excel file (.xlsx)")
     ap.add_argument("--output", "-o", default=None, help="Path to output Excel file (.xlsx). Default: <input>_with_symbols.xlsx")
     ap.add_argument("--sheet", default=None, help="Sheet name (or 0-based index). Default: first sheet")
