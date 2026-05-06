@@ -25,12 +25,14 @@ class TestLookupInfoForSymbol:
             mock_cls.return_value.info = mock_info
             name, debug = sf.lookup_info_for_symbol("AAPL")
         assert name == "Apple"
+        assert "info_ok" in debug
 
     def test_returns_none_when_no_name_fields(self):
         with patch("symbols_finder.yf.Ticker") as mock_cls:
             mock_cls.return_value.info = {"quoteType": "EQUITY"}
             name, debug = sf.lookup_info_for_symbol("AAPL")
         assert name is None
+        assert "info_ok" in debug
 
     def test_empty_symbol_returns_none_without_network_call(self):
         with patch("symbols_finder.yf.Ticker") as mock_cls:
