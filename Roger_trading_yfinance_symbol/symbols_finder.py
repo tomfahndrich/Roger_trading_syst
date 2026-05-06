@@ -113,6 +113,28 @@ def best_symbol_for_company(company: str, max_results: int = 10, timeout: int = 
     return best_sym, best_name or None, f"picked:{best_type}:{best_name}"
 
 
+def lookup_info_for_symbol(symbol: str) -> Tuple[Optional[str], str]:
+    """
+    Returns (company_name, debug_info) for a given ticker symbol.
+    Uses yf.Ticker(symbol).info to resolve longName / shortName.
+    """
+    symbol = (symbol or "").strip()
+    if not symbol:
+        return None, "empty_symbol"
+
+    try:
+        info = yf.Ticker(symbol).info
+    except Exception as e:
+        return None, f"info_error:{type(e).__name__}"
+
+    if not info:
+        return None, "no_info"
+
+    name = info.get("longName") or info.get("shortName") or None
+    qtype = info.get("quoteType", "UNKNOWN")
+    return name, f"info_ok:{qtype}"
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="Add Yahoo Finance symbols to an Excel file based on company names.")
     ap.add_argument("input_xlsx", help="Path to input Excel file (.xlsx)")
