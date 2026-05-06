@@ -140,10 +140,21 @@ def main() -> int:
     ap.add_argument("input_xlsx", help="Path to input Excel file (.xlsx)")
     ap.add_argument("--output", "-o", default=None, help="Path to output Excel file (.xlsx). Default: <input>_with_symbols.xlsx")
     ap.add_argument("--sheet", default=None, help="Sheet name (or 0-based index). Default: first sheet")
-    ap.add_argument("--name-col", default=0, type=int, help="0-based index of company name column. Default: 0 (column A)")
+    ap.add_argument("--name-col", default=0, type=int, help="0-based index of input column (company names in 'name' mode, symbols in 'symbol' mode). Default: 0")
     ap.add_argument("--symbol-col-name", default="Symbol", help="Header name for output symbol column. Default: Symbol")
     ap.add_argument("--sleep", default=0.25, type=float, help="Sleep between requests (seconds). Default: 0.25")
     ap.add_argument("--max-results", default=10, type=int, help="Search max_results. Default: 10")
+    ap.add_argument(
+        "--mode",
+        choices=["name", "symbol"],
+        default="name",
+        help="Input mode: 'name' (company name → symbol, default) or 'symbol' (symbol → company name).",
+    )
+    ap.add_argument(
+        "--source",
+        default="investing.com",
+        help="Value written to the Source column. Default: investing.com",
+    )
     args = ap.parse_args()
 
     inp = args.input_xlsx
@@ -189,7 +200,7 @@ def main() -> int:
     df[args.symbol_col_name] = symbols
     df["Company Name"] = company_names
     df["Yahoo Finance URL"] = yf_urls
-    df["Source"] = "investing.com"
+    df["Source"] = args.source
 
     col_order = [args.symbol_col_name, "Company Name", "Yahoo Finance URL", "Source"]
     out_df = df[col_order]

@@ -1,6 +1,9 @@
 import sys
 import os
+import argparse
+import tempfile
 import pytest
+import pandas as pd
 from unittest.mock import patch, MagicMock, PropertyMock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
@@ -72,3 +75,41 @@ class TestLookupInfoForSymbol:
             name, _ = sf.lookup_info_for_symbol("  AAPL  ")
         mock_cls.assert_called_once_with("AAPL")
         assert name == "Apple Inc."
+
+
+# ── TestArgparse ─────────────────────────────────────────────────────────────
+
+class TestArgparse:
+
+    def _parse(self, args_list):
+        ap = argparse.ArgumentParser()
+        ap.add_argument("input_xlsx")
+        ap.add_argument("--output", "-o", default=None)
+        ap.add_argument("--sheet", default=None)
+        ap.add_argument("--name-col", default=0, type=int)
+        ap.add_argument("--symbol-col-name", default="Symbol")
+        ap.add_argument("--sleep", default=0.25, type=float)
+        ap.add_argument("--max-results", default=10, type=int)
+        ap.add_argument("--mode", choices=["name", "symbol"], default="name")
+        ap.add_argument("--source", default="investing.com")
+        return ap.parse_args(args_list)
+
+    def test_default_mode_is_name(self):
+        args = self._parse(["input.xlsx"])
+        assert args.mode == "name"
+
+    def test_mode_symbol_accepted(self):
+        args = self._parse(["input.xlsx", "--mode", "symbol"])
+        assert args.mode == "symbol"
+
+    def test_mode_invalid_rejected(self):
+        with pytest.raises(SystemExit):
+            self._parse(["input.xlsx", "--mode", "invalid"])
+
+    def test_default_source_is_investing_com(self):
+        args = self._parse(["input.xlsx"])
+        assert args.source == "investing.com"
+
+    def test_custom_source_accepted(self):
+        args = self._parse(["input.xlsx", "--source", "manual"])
+        assert args.source == "manual"
