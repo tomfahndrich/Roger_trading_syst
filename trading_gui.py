@@ -34,6 +34,9 @@ ALL_NEW_ORDER_APPEND = TRADE_COLS_GUI
 SYMBOLS_SHEET = 'symbols'
 SOURCES_SHEET = 'sources'
 SYMBOLS_COLS = ['Symbols', 'Company Name', 'Yahoo Finance URL', 'Source', 'Source URL']
+# Columns updated on duplicate match. 'Symbols' is the row's identity and its
+# original casing is preserved across updates.
+UPDATABLE_SYMBOL_COLS = ['Company Name', 'Yahoo Finance URL', 'Source', 'Source URL']
 
 # Default source list for the Add Tokens dropdown. Written to the `sources` sheet
 # on first launch if absent; thereafter the xlsx is the source of truth so the
@@ -112,12 +115,14 @@ def merge_symbol_rows(existing_df, new_rows):
             continue
         if sym_key in by_symbol:
             idx = by_symbol[sym_key]
-            for col in SYMBOLS_COLS:
+            # Preserve the existing Symbols casing — only metadata cols are overwritten
+            for col in UPDATABLE_SYMBOL_COLS:
                 df.at[idx, col] = row.get(col, df.at[idx, col])
             updated += 1
         elif sym_key in appended_keys:
+            # Same rule for within-batch duplicates: first occurrence sets the casing
             entry = appended[appended_keys[sym_key]]
-            for col in SYMBOLS_COLS:
+            for col in UPDATABLE_SYMBOL_COLS:
                 entry[col] = row.get(col, entry[col])
         else:
             appended.append({col: row.get(col, '') for col in SYMBOLS_COLS})
