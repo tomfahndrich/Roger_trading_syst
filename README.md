@@ -42,8 +42,8 @@ This project is a trading signal generator and management system designed to hel
    pip install -r requirements.txt
    ```
 
-2. **Configure symbols**  
-   Add your trading symbols to the "symbols" sheet in the `trading_synthesis.xlsx` file.
+2. **Configure symbols**
+   Add your trading symbols to the "symbols" sheet in the `trading_synthesis.xlsx` file — either manually in Excel, or directly from the GUI via the **Add Tokens** tab (see below).
 
 3. **Launch the application**  
    You can launch the application in different ways:
@@ -86,6 +86,15 @@ The GUI provides several features to make working with trading signals easier:
 4. **Managing Notes**
    - **Double-click** any note field to add or edit notes
    - Notes auto-save to Excel
+
+5. **Add Tokens tab**
+   The 5th tab lets you grow the watched-symbols list without leaving the GUI:
+   - **URL (optional)**: source page link — appears as "Source URL" in the token tooltip
+   - **Mode**: paste either ticker symbols (`AAPL`, `MSFT`...) or company names (`Apple Inc.`, `Microsoft`...)
+   - **Source**: dropdown driven by the `sources` sheet of the xlsx (editable directly in Excel to add new sources). The `Investing.com - {NOM DE LA LISTE}` template reveals an extra field for the watchlist name.
+   - **Tokens**: paste one entry per line
+   - **Add Tokens** button: each entry is resolved via yfinance (`yfinance.Ticker.info` for symbols, `yfinance.Search` for names), then appended to the `symbols` sheet — duplicates update the existing row's metadata in place (the `Symbols` column is never overwritten). A summary reports added / updated / failed counts. Failures (unknown ticker, ambiguous name) are listed in the log without blocking the rest of the batch.
+   - The tooltip shown when hovering a token in any timeframe tab now includes the **Source URL** line you provided here.
 
 ## Notes
 
