@@ -17,6 +17,25 @@ NOTES_COL_GUI = 'notes'
 TRADE_COLS_GUI = TRADE_COLS  # Reuse ordering from generator
 ALL_NEW_ORDER_APPEND = TRADE_COLS_GUI
 
+# Symbols sheet schema (constants — single source of truth)
+SYMBOLS_SHEET = 'symbols'
+SOURCES_SHEET = 'sources'
+SYMBOLS_COLS = ['Symbols', 'Company Name', 'Yahoo Finance URL', 'Source', 'Source URL']
+
+# Default source list for the Add Tokens dropdown. Written to the `sources` sheet
+# on first launch if absent; thereafter the xlsx is the source of truth so the
+# user can edit sources without touching code.
+DEFAULT_SOURCES = [
+    "Buffet videos",
+    "Diallo videos",
+    "Raoul Pal",
+    "Quentin Chapeau",
+    "Investing.com Actu",
+    "Investing.com - {NOM DE LA LISTE}",
+]
+INVESTING_LIST_TEMPLATE = "Investing.com - {NOM DE LA LISTE}"
+INVESTING_PREFIX = "Investing.com"
+
 DATA_LOCK = threading.Lock()
 
 def format_decimal(val):
@@ -236,8 +255,12 @@ class TradingApp:
                     df[tc] = ""
             self.data[sheet] = df
             
-        # symbol_info: {token: {company_name, yf_url, source}} — populated in load_data()
+        # symbol_info: {token: {company_name, yf_url, source, source_url}} — populated in load_data()
         self.symbol_info = {}
+
+        # Source list driving the Add Tokens dropdown — refreshed from xlsx in load_data().
+        # Initialized to defaults so create_widgets() can build the combobox before xlsx is read.
+        self.available_sources = list(DEFAULT_SOURCES)
 
         # Create menu
         self.create_menu()
@@ -542,10 +565,10 @@ class TradingApp:
                 self.status_var.set(f"{EXCEL_FILE} not found.")
                 # self.data is already initialized with empty structured DataFrames
 
-            # Load symbol metadata for tooltips
+            # Load symbol metadata for tooltips (incl. new Source URL column)
             self.symbol_info.clear()
             try:
-                sym_df = pd.read_excel(EXCEL_FILE, sheet_name="symbols")
+                sym_df = pd.read_excel(EXCEL_FILE, sheet_name=SYMBOLS_SHEET)
                 for _, row in sym_df.iterrows():
                     token = str(row.get("Symbols", "") or "").strip()
                     if token:
@@ -553,9 +576,13 @@ class TradingApp:
                             "company_name": str(row.get("Company Name", "") or "").strip(),
                             "yf_url": str(row.get("Yahoo Finance URL", "") or "").strip(),
                             "source": str(row.get("Source", "") or "").strip(),
+                            "source_url": str(row.get("Source URL", "") or "").strip(),
                         }
             except Exception:
                 pass
+
+            # Load (or create) the sources sheet driving the Add Tokens dropdown
+            self._refresh_available_sources()
 
             self.display_all_data() # Helper to refresh all tabs
             self.status_var.set("Data loaded successfully")
@@ -704,10 +731,12 @@ class TradingApp:
                                         df_save[c] = pd.to_numeric(df_save[c], errors='coerce')
                                 df_save.to_excel(writer, sheet_name=sheet_name, index=False)
                         for sn, df_pres in preserve.items():
-                            if sn == "symbols":
-                                for col in ["Company Name", "Yahoo Finance URL", "Source"]:
+                            if sn == SYMBOLS_SHEET:
+                                for col in ["Company Name", "Yahoo Finance URL", "Source", "Source URL"]:
                                     if col not in df_pres.columns:
                                         df_pres[col] = ""
+                                # Reorder to canonical column order
+                                df_pres = df_pres.reindex(columns=SYMBOLS_COLS)
                             df_pres.to_excel(writer, sheet_name=sn, index=False)
                     shutil.move(temp_path, EXCEL_FILE)
                 finally:
@@ -720,6 +749,63 @@ class TradingApp:
         except Exception as e:
             messagebox.showerror("Save Error", f"Error: {e}")
             self.status_var.set("Save failed")
+
+    def _refresh_available_sources(self):
+        """Read the `sources` sheet from xlsx; bootstrap it with DEFAULT_SOURCES if absent.
+        Updates self.available_sources and refreshes the Add Tokens combobox values if built."""
+        sources = None
+        if os.path.exists(EXCEL_FILE):
+            try:
+                xl = pd.ExcelFile(EXCEL_FILE)
+                if SOURCES_SHEET in xl.sheet_names:
+                    src_df = pd.read_excel(xl, SOURCES_SHEET)
+                    if not src_df.empty:
+                        sources = [
+                            str(s).strip()
+                            for s in src_df.iloc[:, 0].dropna().tolist()
+                            if str(s).strip()
+                        ]
+            except Exception as e:
+                print(f"[sources] read warning: {e}")
+
+        if not sources:
+            sources = list(DEFAULT_SOURCES)
+            if os.path.exists(EXCEL_FILE):
+                try:
+                    self._write_sources_sheet(sources)
+                except Exception as e:
+                    print(f"[sources] could not initialize sources sheet: {e}")
+
+        self.available_sources = sources
+        cb = getattr(self, 'source_combobox', None)
+        if cb is not None:
+            cb['values'] = sources
+
+    def _write_sources_sheet(self, sources):
+        """Persist a `sources` sheet to xlsx, preserving every other sheet verbatim.
+        Used on first launch when the sheet does not yet exist."""
+        with DATA_LOCK:
+            existing = {}
+            try:
+                xl = pd.ExcelFile(EXCEL_FILE)
+                for sn in xl.sheet_names:
+                    existing[sn] = pd.read_excel(xl, sn)
+            except Exception as e:
+                print(f"[sources] preserve read warning: {e}")
+            existing[SOURCES_SHEET] = pd.DataFrame({"Source Name": sources})
+            temp_fd, temp_path = tempfile.mkstemp(suffix='.xlsx', prefix='tmp_sources_')
+            os.close(temp_fd)
+            try:
+                with pd.ExcelWriter(temp_path, engine='openpyxl') as writer:
+                    for sn, df in existing.items():
+                        df.to_excel(writer, sheet_name=sn, index=False)
+                shutil.move(temp_path, EXCEL_FILE)
+            finally:
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except OSError:
+                        pass
 
     def update_data(self):
         """Update data by running the trading signal generator and reloading from Excel."""
