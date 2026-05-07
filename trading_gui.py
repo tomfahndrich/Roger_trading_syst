@@ -141,6 +141,7 @@ class TokenTooltip:
         self._show(token,
                    info.get("company_name") or "-",
                    info.get("yf_url") or "",
+                   info.get("source_url") or "",
                    info.get("source") or "-",
                    event.x_root + 15, event.y_root + 15)
 
@@ -179,7 +180,7 @@ class TokenTooltip:
             self.tooltip_window.destroy()
             self.tooltip_window = None
 
-    def _show(self, token, company, yf_url, source, x, y):
+    def _show(self, token, company, yf_url, source_url, source, x, y):
         if self.tooltip_window:
             self.tooltip_window.destroy()
             self.tooltip_window = None
@@ -188,16 +189,23 @@ class TokenTooltip:
         win.wm_geometry(f"+{x}+{y}")
         win.configure(background="#FFFFDD")
         pad = {"padx": 8, "pady": 2, "anchor": "w", "fg": "black"}
-        tk.Label(win, text=f"Symbol:  {token}",  bg="#FFFFDD", font=("Arial", 10, "bold"), **pad).pack(fill="x")
-        tk.Label(win, text=f"Company: {company}", bg="#FFFFDD", font=("Arial", 10), **pad).pack(fill="x")
+        tk.Label(win, text=f"Symbol:     {token}",  bg="#FFFFDD", font=("Arial", 10, "bold"), **pad).pack(fill="x")
+        tk.Label(win, text=f"Company:    {company}", bg="#FFFFDD", font=("Arial", 10), **pad).pack(fill="x")
         if yf_url:
-            lnk = tk.Label(win, text=f"URL:     {yf_url}", bg="#FFFFDD",
+            lnk = tk.Label(win, text=f"URL:        {yf_url}", bg="#FFFFDD",
                            font=("Arial", 10), fg="blue", cursor="hand2", padx=8, pady=2, anchor="w")
             lnk.pack(fill="x")
             lnk.bind("<Button-1>", lambda e, u=yf_url: webbrowser.open(u))
         else:
-            tk.Label(win, text="URL:     -", bg="#FFFFDD", font=("Arial", 10), **pad).pack(fill="x")
-        tk.Label(win, text=f"Source:  {source}", bg="#FFFFDD", font=("Arial", 10),
+            tk.Label(win, text="URL:        -", bg="#FFFFDD", font=("Arial", 10), **pad).pack(fill="x")
+        if source_url:
+            src_lnk = tk.Label(win, text=f"Source URL: {source_url}", bg="#FFFFDD",
+                               font=("Arial", 10), fg="blue", cursor="hand2", padx=8, pady=2, anchor="w")
+            src_lnk.pack(fill="x")
+            src_lnk.bind("<Button-1>", lambda e, u=source_url: webbrowser.open(u))
+        else:
+            tk.Label(win, text="Source URL: -", bg="#FFFFDD", font=("Arial", 10), **pad).pack(fill="x")
+        tk.Label(win, text=f"Source:     {source}", bg="#FFFFDD", font=("Arial", 10),
                  fg="black", padx=8, pady=2, anchor="w").pack(fill="x", pady=(0, 4))
         win.update_idletasks()
         self.tooltip_window = win
