@@ -1,4 +1,6 @@
 import os
+import sys
+import time
 import webbrowser
 import numpy as np
 import tkinter as tk
@@ -8,6 +10,17 @@ from trading_signal_generator import main as generate_signals, TIMEFRAMES, EXCEL
 import threading
 import tempfile
 import shutil
+
+# Make the symbols_finder helpers importable regardless of cwd. trading_gui.py
+# may be launched directly from any directory; we anchor the package path on
+# this file's location.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+from Roger_trading_yfinance_symbol.symbols_finder import (
+    best_symbol_for_company,
+    lookup_info_for_symbol,
+)
 
 # BASE_COLS from trading_signal_generator.py: ['datetime', 'signal', 'token', 'close price', 'CCI', 'stoch K', 'stoch D', 'slope K', 'slope D', 'ADX']
 BASE_COLS_GUI = ['datetime', 'signal', 'token', 'close price', 'CCI', 'stoch K', 'stoch D', 'slope K', 'slope D', 'ADX']
@@ -37,6 +50,87 @@ INVESTING_LIST_TEMPLATE = "Investing.com - {NOM DE LA LISTE}"
 INVESTING_PREFIX = "Investing.com"
 
 DATA_LOCK = threading.Lock()
+
+
+def parse_tokens(text):
+    """Parse a multi-line text into a deduplicated, stripped list of non-empty tokens.
+    Deduplication is case-insensitive; the first occurrence's casing is preserved."""
+    seen = set()
+    result = []
+    for line in (text or "").splitlines():
+        token = line.strip()
+        if not token:
+            continue
+        key = token.upper()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(token)
+    return result
+
+
+def build_source(template, list_name):
+    """Resolve the final Source string written to the symbols sheet.
+    Special case: the Investing.com template gets concatenated with list_name,
+    or strips the suffix entirely when list_name is empty."""
+    template = (template or "").strip()
+    list_name = (list_name or "").strip()
+    if template == INVESTING_LIST_TEMPLATE:
+        return f"{INVESTING_PREFIX} - {list_name}" if list_name else INVESTING_PREFIX
+    return template
+
+
+def merge_symbol_rows(existing_df, new_rows):
+    """Merge new_rows into existing_df, returning (merged_df, added, updated).
+
+    - Matches existing rows on Symbols column case-insensitively (strip + upper)
+    - Existing matches: every column in SYMBOLS_COLS is overwritten with the new value
+    - Non-matches: appended at the end
+    - Within-batch duplicates: first appended, later occurrences update the queued row
+    - Rows with empty Symbols are silently skipped
+    """
+    df = existing_df.copy() if existing_df is not None else pd.DataFrame(columns=SYMBOLS_COLS)
+    for col in SYMBOLS_COLS:
+        if col not in df.columns:
+            df[col] = ""
+    df = df.reindex(columns=SYMBOLS_COLS)
+
+    sym_lower = df['Symbols'].astype(str).str.strip().str.upper()
+    by_symbol = {}
+    for idx, sym in sym_lower.items():
+        if sym and sym not in by_symbol:
+            by_symbol[sym] = idx
+
+    added = 0
+    updated = 0
+    appended = []  # ordered list of dict rows pending append
+    appended_keys = {}  # sym_key -> index into appended
+
+    for row in new_rows or []:
+        sym_key = str(row.get('Symbols', '')).strip().upper()
+        if not sym_key:
+            continue
+        if sym_key in by_symbol:
+            idx = by_symbol[sym_key]
+            for col in SYMBOLS_COLS:
+                df.at[idx, col] = row.get(col, df.at[idx, col])
+            updated += 1
+        elif sym_key in appended_keys:
+            entry = appended[appended_keys[sym_key]]
+            for col in SYMBOLS_COLS:
+                entry[col] = row.get(col, entry[col])
+        else:
+            appended.append({col: row.get(col, '') for col in SYMBOLS_COLS})
+            appended_keys[sym_key] = len(appended) - 1
+            added += 1
+
+    if appended:
+        df = pd.concat(
+            [df, pd.DataFrame(appended, columns=SYMBOLS_COLS)],
+            ignore_index=True,
+        )
+    return df, added, updated
+
 
 def format_decimal(val):
     if val is None or val == "" or (isinstance(val, float) and pd.isna(val)):
@@ -633,8 +727,166 @@ class TradingApp:
         self.add_log.config(state=tk.DISABLED)
 
     def _on_add_tokens(self):
-        """Stub — full implementation lands in Phase 4."""
-        messagebox.showinfo("Add Tokens", "UI built. Logique d'ajout implémentée en Phase 4.")
+        """Validate inputs, then dispatch lookup + persistence to a daemon thread."""
+        raw_text = self.tokens_text.get("1.0", tk.END)
+        tokens = parse_tokens(raw_text)
+        if not tokens:
+            messagebox.showwarning("Add Tokens", "Aucun token à ajouter — la zone est vide.")
+            self.tokens_text.focus_set()
+            return
+
+        mode = self.mode_var.get()
+        source = build_source(self.source_var.get(), self.list_name_var.get())
+        url = self.url_var.get().strip()
+        if not source:
+            messagebox.showwarning("Add Tokens", "Sélectionne une source dans le menu déroulant.")
+            return
+
+        self.add_btn.config(state=tk.DISABLED)
+        self._log_clear()
+        self._log_append(
+            f"Lookup {len(tokens)} entrée(s) — mode={mode!r}, source={source!r}"
+        )
+
+        threading.Thread(
+            target=self._add_tokens_worker,
+            args=(tokens, mode, source, url),
+            daemon=True,
+        ).start()
+
+    def _add_tokens_worker(self, tokens, mode, source, url):
+        """Background: resolve each entry via yfinance, then atomically merge into xlsx.
+        UI updates are dispatched back to the main thread via root.after()."""
+        success_rows = []
+        failures = []
+        total = len(tokens)
+        for i, raw in enumerate(tokens, start=1):
+            symbol = None
+            company_name = None
+            try:
+                if mode == "symbol":
+                    symbol = raw
+                    company_name, _dbg = lookup_info_for_symbol(raw)
+                else:
+                    symbol, company_name, _dbg = best_symbol_for_company(raw)
+            except Exception as e:
+                self.root.after(0, self._log_append,
+                                f"[{i}/{total}] {raw!r} → erreur: {type(e).__name__}: {e}")
+                failures.append(raw)
+                time.sleep(0.25)
+                continue
+
+            if symbol and company_name:
+                yf_url = f"https://finance.yahoo.com/quote/{symbol}/"
+                success_rows.append({
+                    "Symbols": symbol,
+                    "Company Name": company_name,
+                    "Yahoo Finance URL": yf_url,
+                    "Source": source,
+                    "Source URL": url,
+                })
+                self.root.after(0, self._log_append,
+                                f"[{i}/{total}] {raw!r} → {symbol}  ({company_name})")
+            else:
+                failures.append(raw)
+                self.root.after(0, self._log_append,
+                                f"[{i}/{total}] {raw!r} → ÉCHEC (pas de résultat)")
+            time.sleep(0.25)
+
+        added = 0
+        updated = 0
+        persist_error = None
+        if success_rows:
+            try:
+                added, updated = self._merge_into_symbols_sheet(success_rows)
+            except Exception as e:
+                persist_error = e
+
+        self.root.after(0, self._on_add_complete, added, updated, failures, persist_error)
+
+    def _merge_into_symbols_sheet(self, new_rows):
+        """Atomic merge of new_rows into the symbols sheet of EXCEL_FILE.
+        Reads ALL sheets, mutates ONLY the symbols sheet, writes back via temp+move.
+        Every other sheet (timeframes, sources, anything else) is preserved verbatim.
+        Returns (added, updated)."""
+        with DATA_LOCK:
+            existing = {}
+            if os.path.exists(EXCEL_FILE):
+                try:
+                    xl = pd.ExcelFile(EXCEL_FILE)
+                    for sn in xl.sheet_names:
+                        existing[sn] = pd.read_excel(xl, sn)
+                except Exception as e:
+                    print(f"[merge] preserve read warning: {e}")
+
+            symbols_df = existing.get(SYMBOLS_SHEET, pd.DataFrame(columns=SYMBOLS_COLS))
+            merged, added, updated = merge_symbol_rows(symbols_df, new_rows)
+            existing[SYMBOLS_SHEET] = merged
+
+            temp_fd, temp_path = tempfile.mkstemp(suffix='.xlsx', prefix='tmp_addtokens_')
+            os.close(temp_fd)
+            try:
+                with pd.ExcelWriter(temp_path, engine='openpyxl') as writer:
+                    for sn, df in existing.items():
+                        df.to_excel(writer, sheet_name=sn, index=False)
+                shutil.move(temp_path, EXCEL_FILE)
+            finally:
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except OSError:
+                        pass
+            return added, updated
+
+    def _on_add_complete(self, added, updated, failures, persist_error):
+        """Main-thread callback: re-enable UI, refresh tooltip data, show summary."""
+        self.add_btn.config(state=tk.NORMAL)
+
+        if persist_error:
+            msg = f"Erreur lors de l'écriture xlsx: {persist_error}"
+            self._log_append(msg)
+            messagebox.showerror("Add Tokens", msg)
+            return
+
+        try:
+            self._reload_symbol_info()
+        except Exception as e:
+            print(f"[reload symbol_info] {e}")
+
+        summary_lines = [f"{added} ajouté(s), {updated} mis à jour, {len(failures)} échec(s)."]
+        if failures:
+            preview = failures[:20]
+            summary_lines.append("Échecs : " + ", ".join(preview))
+            if len(failures) > 20:
+                summary_lines.append(f"(+ {len(failures) - 20} autres)")
+
+        self._log_append("--- Terminé ---")
+        for line in summary_lines:
+            self._log_append(line)
+
+        if added or updated:
+            self.tokens_text.delete("1.0", tk.END)
+        messagebox.showinfo("Add Tokens", "\n".join(summary_lines))
+
+    def _reload_symbol_info(self):
+        """Re-read the symbols sheet to refresh tooltip metadata without disturbing
+        timeframe Treeviews or any active filter."""
+        self.symbol_info.clear()
+        if not os.path.exists(EXCEL_FILE):
+            return
+        try:
+            sym_df = pd.read_excel(EXCEL_FILE, sheet_name=SYMBOLS_SHEET)
+        except Exception:
+            return
+        for _, row in sym_df.iterrows():
+            token = str(row.get("Symbols", "") or "").strip()
+            if token:
+                self.symbol_info[token] = {
+                    "company_name": str(row.get("Company Name", "") or "").strip(),
+                    "yf_url": str(row.get("Yahoo Finance URL", "") or "").strip(),
+                    "source": str(row.get("Source", "") or "").strip(),
+                    "source_url": str(row.get("Source URL", "") or "").strip(),
+                }
 
     def load_data(self):
         """Load data exclusively from Excel file."""
