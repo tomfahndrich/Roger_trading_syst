@@ -503,11 +503,138 @@ class TradingApp:
             tree.bind("<Double-1>", self.on_double_click)
             TokenTooltip(tree, self.symbol_info)
 
+        # Build Add Tokens tab (after timeframe tabs)
+        self._build_add_tokens_tab()
+
         # Add status bar
         self.status_var = tk.StringVar()
         status_bar = tk.Label(self.root, textvariable=self.status_var, bd=1, relief=tk.SUNKEN, anchor=tk.W, pady=3)
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
         self.status_var.set("Ready")
+
+    def _build_add_tokens_tab(self):
+        """Build the Add Tokens tab inside self.notebook (always last after timeframes).
+        UI only — handlers are stubbed and wired in Phase 4."""
+        frame = tk.Frame(self.notebook)
+        self.notebook.add(frame, text="Add Tokens")
+        self.tabs['add_tokens'] = frame
+
+        container = tk.Frame(frame, padx=20, pady=15)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        # --- URL field (optional)
+        url_frame = tk.LabelFrame(container, text=" URL (optionnel) ",
+                                  font=("Arial", 10, "bold"), padx=10, pady=8)
+        url_frame.pack(fill=tk.X, pady=(0, 8))
+        self.url_var = tk.StringVar()
+        url_entry = tk.Entry(url_frame, textvariable=self.url_var, width=80)
+        url_entry.pack(fill=tk.X)
+        ToolTip(url_entry, "URL de la page d'origine — apparaît dans le tooltip des tokens. Vide = trait dans le tooltip.")
+
+        # --- Mode selector (radio: symbol vs name)
+        mode_frame = tk.LabelFrame(container, text=" Mode d'entrée ",
+                                   font=("Arial", 10, "bold"), padx=10, pady=8)
+        mode_frame.pack(fill=tk.X, pady=(0, 8))
+        self.mode_var = tk.StringVar(value="symbol")
+        tk.Radiobutton(mode_frame, text="Symboles (ex: AAPL, MSFT)",
+                       variable=self.mode_var, value="symbol").pack(side=tk.LEFT, padx=10)
+        tk.Radiobutton(mode_frame, text="Noms d'entreprises (ex: Apple Inc.)",
+                       variable=self.mode_var, value="name").pack(side=tk.LEFT, padx=10)
+
+        # --- Source dropdown (+ conditional list-name entry)
+        source_frame = tk.LabelFrame(container, text=" Source ",
+                                     font=("Arial", 10, "bold"), padx=10, pady=8)
+        source_frame.pack(fill=tk.X, pady=(0, 8))
+
+        src_row = tk.Frame(source_frame)
+        src_row.pack(fill=tk.X)
+        tk.Label(src_row, text="Choisir :").pack(side=tk.LEFT, padx=(0, 6))
+        initial = self.available_sources[0] if self.available_sources else ""
+        self.source_var = tk.StringVar(value=initial)
+        self.source_combobox = ttk.Combobox(src_row, textvariable=self.source_var,
+                                            values=self.available_sources,
+                                            state="readonly", width=40)
+        self.source_combobox.pack(side=tk.LEFT, padx=4)
+        self.source_combobox.bind("<<ComboboxSelected>>", self._on_source_changed)
+
+        # Conditional list-name field — only for the Investing.com template
+        self.list_name_frame = tk.Frame(source_frame)
+        self.list_name_var = tk.StringVar()
+        tk.Label(self.list_name_frame, text="Nom de la liste (optionnel) :").pack(side=tk.LEFT, padx=(0, 6))
+        list_name_entry = tk.Entry(self.list_name_frame, textvariable=self.list_name_var, width=35)
+        list_name_entry.pack(side=tk.LEFT)
+        ToolTip(list_name_entry,
+                "Concaténé à 'Investing.com - '. Vide = stocke 'Investing.com' tout court.")
+        self._on_source_changed()  # set initial visibility
+
+        # --- Tokens text area
+        tokens_frame = tk.LabelFrame(container, text=" Tokens (un par ligne) ",
+                                     font=("Arial", 10, "bold"), padx=10, pady=8)
+        tokens_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+        tokens_inner = tk.Frame(tokens_frame)
+        tokens_inner.pack(fill=tk.BOTH, expand=True)
+        self.tokens_text = tk.Text(tokens_inner, height=8, font=("Courier", 10), wrap=tk.NONE)
+        tokens_scroll = ttk.Scrollbar(tokens_inner, orient=tk.VERTICAL, command=self.tokens_text.yview)
+        self.tokens_text.configure(yscrollcommand=tokens_scroll.set)
+        tokens_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tokens_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # --- Action buttons
+        btn_frame = tk.Frame(container)
+        btn_frame.pack(fill=tk.X, pady=(0, 8))
+        self.add_btn = tk.Button(btn_frame, text="➕ Add Tokens", command=self._on_add_tokens,
+                                 bg="#1565C0", fg="white", font=("Arial", 12, "bold"),
+                                 padx=20, pady=6, cursor="hand2", relief=tk.RAISED)
+        self.add_btn.pack(side=tk.LEFT, padx=(0, 8))
+        ToolTip(self.add_btn,
+                "Lookup chaque token via yfinance puis ajoute / met à jour la feuille symbols. Bloqué pendant le traitement.")
+
+        clear_btn = tk.Button(btn_frame, text="Clear", command=self._on_add_clear,
+                              bg="#DCDAD5", padx=15, pady=6, cursor="hand2")
+        clear_btn.pack(side=tk.LEFT)
+        ToolTip(clear_btn, "Vider la zone de tokens et les logs.")
+
+        # --- Status / Log area (read-only)
+        log_frame = tk.LabelFrame(container, text=" Status / Log ",
+                                  font=("Arial", 10, "bold"), padx=10, pady=8)
+        log_frame.pack(fill=tk.BOTH, expand=True)
+        log_inner = tk.Frame(log_frame)
+        log_inner.pack(fill=tk.BOTH, expand=True)
+        self.add_log = tk.Text(log_inner, height=6, font=("Courier", 9), wrap=tk.WORD,
+                               state=tk.DISABLED, bg="#F5F5F5")
+        log_scroll = ttk.Scrollbar(log_inner, orient=tk.VERTICAL, command=self.add_log.yview)
+        self.add_log.configure(yscrollcommand=log_scroll.set)
+        log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.add_log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    def _on_source_changed(self, event=None):
+        """Toggle the optional list-name field for the Investing.com template."""
+        if self.source_var.get() == INVESTING_LIST_TEMPLATE:
+            self.list_name_frame.pack(fill=tk.X, pady=(8, 0))
+        else:
+            self.list_name_frame.pack_forget()
+            self.list_name_var.set("")
+
+    def _on_add_clear(self):
+        """Clear the tokens text area and the log widget."""
+        self.tokens_text.delete("1.0", tk.END)
+        self._log_clear()
+
+    def _log_clear(self):
+        self.add_log.config(state=tk.NORMAL)
+        self.add_log.delete("1.0", tk.END)
+        self.add_log.config(state=tk.DISABLED)
+
+    def _log_append(self, msg):
+        """Append a line to the log widget (must be called on the main thread)."""
+        self.add_log.config(state=tk.NORMAL)
+        self.add_log.insert(tk.END, msg + "\n")
+        self.add_log.see(tk.END)
+        self.add_log.config(state=tk.DISABLED)
+
+    def _on_add_tokens(self):
+        """Stub — full implementation lands in Phase 4."""
+        messagebox.showinfo("Add Tokens", "UI built. Logique d'ajout implémentée en Phase 4.")
 
     def load_data(self):
         """Load data exclusively from Excel file."""
