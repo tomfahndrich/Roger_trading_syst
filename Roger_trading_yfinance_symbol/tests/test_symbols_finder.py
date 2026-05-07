@@ -174,3 +174,141 @@ class TestMainModeRouting:
             df = self._run_main_with_temp_excel(["AAPL"], ["--mode", "symbol", "--source", "manual"])
 
         assert df.iloc[0]["Source"] == "manual"
+
+
+# ── parse_exchange_token ──────────────────────────────────────────────────────
+
+class TestParseExchangeToken:
+
+    def test_no_colon_returns_none_and_full_string(self):
+        assert sf.parse_exchange_token("AAPL") == (None, "AAPL")
+        assert sf.parse_exchange_token("MUV2.DE") == (None, "MUV2.DE")
+
+    def test_known_exchange_uppercased(self):
+        assert sf.parse_exchange_token("xtra:MUV2") == ("XTRA", "MUV2")
+        assert sf.parse_exchange_token("NYSE:WES") == ("NYSE", "WES")
+
+    def test_strips_whitespace_around_parts(self):
+        assert sf.parse_exchange_token("  XTRA : MUV2  ") == ("XTRA", "MUV2")
+
+    def test_empty_or_lone_colon_falls_back_to_bare_string(self):
+        assert sf.parse_exchange_token("") == (None, "")
+        assert sf.parse_exchange_token(None) == (None, "")
+        assert sf.parse_exchange_token(":") == (None, "")
+        assert sf.parse_exchange_token("XTRA:") == (None, "XTRA")
+        assert sf.parse_exchange_token(":MUV2") == (None, "MUV2")
+
+
+# ── to_yf_symbol ──────────────────────────────────────────────────────────────
+
+class TestToYfSymbol:
+
+    def test_xetra_prefix_appends_de_suffix(self):
+        assert sf.to_yf_symbol("XTRA:MUV2") == "MUV2.DE"
+        assert sf.to_yf_symbol("XTRA:SHLG") == "SHLG.DE"
+        assert sf.to_yf_symbol("xetr:bmw") == "bmw.DE"  # case-insensitive prefix
+
+    def test_us_exchange_strips_prefix_no_suffix(self):
+        assert sf.to_yf_symbol("NYSE:WES") == "WES"
+        assert sf.to_yf_symbol("NASDAQ:AAPL") == "AAPL"
+        assert sf.to_yf_symbol("AMEX:GLD") == "GLD"
+
+    def test_european_suffixes(self):
+        assert sf.to_yf_symbol("LSE:SHEL") == "SHEL.L"
+        assert sf.to_yf_symbol("EPA:LVMH") == "LVMH.PA"
+        assert sf.to_yf_symbol("SIX:NESN") == "NESN.SW"
+        assert sf.to_yf_symbol("BIT:ENI") == "ENI.MI"
+        assert sf.to_yf_symbol("AMS:ASML") == "ASML.AS"
+
+    def test_asia_pacific_suffixes(self):
+        assert sf.to_yf_symbol("HKEX:0700") == "0700.HK"
+        assert sf.to_yf_symbol("TYO:7203") == "7203.T"
+        assert sf.to_yf_symbol("ASX:BHP") == "BHP.AX"
+
+    def test_unknown_prefix_falls_back_to_bare_symbol(self):
+        # FOO is not in the EXCHANGE_TO_YF_SUFFIX map → return bare symbol
+        assert sf.to_yf_symbol("FOO:BAR") == "BAR"
+        assert sf.to_yf_symbol("MADEUP:XYZ") == "XYZ"
+
+    def test_no_prefix_passes_through(self):
+        assert sf.to_yf_symbol("AAPL") == "AAPL"
+        assert sf.to_yf_symbol("MUV2.DE") == "MUV2.DE"  # already resolved
+        assert sf.to_yf_symbol("BRK-B") == "BRK-B"
+
+    def test_idempotent_on_resolved_input(self):
+        # Applying twice returns the same result
+        for raw in ("XTRA:MUV2", "NYSE:WES", "AAPL", "FOO:BAR"):
+            once = sf.to_yf_symbol(raw)
+            twice = sf.to_yf_symbol(once)
+            assert once == twice, f"not idempotent for {raw!r}: {once!r} -> {twice!r}"
+
+    def test_empty_inputs(self):
+        assert sf.to_yf_symbol("") == ""
+        assert sf.to_yf_symbol(None) == ""
+
+
+# ── lookup_info_for_symbol resolves EXCHANGE:SYMBOL before yfinance ──────────
+
+class TestLookupResolvesExchangePrefix:
+
+    def test_xtra_prefix_queries_yfinance_with_de_suffix(self):
+        captured = {}
+
+        def fake_ticker(arg):
+            captured["arg"] = arg
+            mock = MagicMock()
+            mock.info = {"longName": "Münchener Rückversicherungs-Gesellschaft AG",
+                         "quoteType": "EQUITY"}
+            return mock
+
+        with patch("symbols_finder.yf.Ticker", side_effect=fake_ticker):
+            name, dbg = sf.lookup_info_for_symbol("XTRA:MUV2")
+
+        assert captured["arg"] == "MUV2.DE", "yfinance.Ticker should receive the resolved Yahoo symbol"
+        assert name == "Münchener Rückversicherungs-Gesellschaft AG"
+        assert "info_ok" in dbg
+
+    def test_nyse_prefix_queries_yfinance_with_bare_symbol(self):
+        captured = {}
+
+        def fake_ticker(arg):
+            captured["arg"] = arg
+            mock = MagicMock()
+            mock.info = {"longName": "Western Midstream Partners",
+                         "quoteType": "EQUITY"}
+            return mock
+
+        with patch("symbols_finder.yf.Ticker", side_effect=fake_ticker):
+            name, _ = sf.lookup_info_for_symbol("NYSE:WES")
+
+        assert captured["arg"] == "WES"
+        assert name == "Western Midstream Partners"
+
+    def test_unknown_prefix_queries_yfinance_with_bare_symbol(self):
+        captured = {}
+
+        def fake_ticker(arg):
+            captured["arg"] = arg
+            mock = MagicMock()
+            mock.info = {}  # nothing found
+            return mock
+
+        with patch("symbols_finder.yf.Ticker", side_effect=fake_ticker):
+            name, _ = sf.lookup_info_for_symbol("FOO:BAR")
+
+        assert captured["arg"] == "BAR", "Unknown prefix should fall back to bare symbol"
+        assert name is None
+
+    def test_bare_symbol_queries_yfinance_unchanged(self):
+        captured = {}
+
+        def fake_ticker(arg):
+            captured["arg"] = arg
+            mock = MagicMock()
+            mock.info = {"longName": "Apple Inc.", "quoteType": "EQUITY"}
+            return mock
+
+        with patch("symbols_finder.yf.Ticker", side_effect=fake_ticker):
+            sf.lookup_info_for_symbol("AAPL")
+
+        assert captured["arg"] == "AAPL"

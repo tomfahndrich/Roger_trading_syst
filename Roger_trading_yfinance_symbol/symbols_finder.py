@@ -26,12 +26,92 @@ import pandas as pd
 import yfinance as yf
 
 
-TICKER_LIKE_RE = re.compile(r"^[A-Z0-9.\-^=]{1,15}$")  # rough heuristic
+TICKER_LIKE_RE = re.compile(r"^[A-Z0-9.\-^=:]{1,25}$")  # rough heuristic; ':' allows EXCHANGE:SYMBOL form
 
 
 def looks_like_ticker(s: str) -> bool:
     s = (s or "").strip()
     return bool(s) and bool(TICKER_LIKE_RE.match(s)) and s.upper() == s
+
+
+# Mapping from common exchange prefixes (TradingView-style EXCHANGE:SYMBOL)
+# to the suffix Yahoo Finance expects (e.g. ".DE" for Xetra, "" for US).
+# Empty string = US listing, no suffix needed. Unknown prefixes fall back
+# to the raw symbol (see to_yf_symbol below).
+EXCHANGE_TO_YF_SUFFIX: Dict[str, str] = {
+    # United States
+    "NYSE": "", "NASDAQ": "", "NSDQ": "", "AMEX": "", "BATS": "",
+    "ARCA": "", "OTC": "", "OTCMKTS": "", "CBOE": "", "PINK": "",
+    # Germany
+    "XTRA": ".DE", "XETR": ".DE", "ETR": ".DE", "FWB": ".F", "FRA": ".F",
+    "GETTEX": ".DE", "TRADEGATE": ".DE",
+    # United Kingdom
+    "LSE": ".L", "LON": ".L", "AIM": ".L",
+    # Canada
+    "TSX": ".TO", "TSXV": ".V", "CSE": ".CN", "NEO": ".NE",
+    # Australia / New Zealand
+    "ASX": ".AX", "NZX": ".NZ",
+    # Asia / Pacific
+    "HKEX": ".HK", "SEHK": ".HK",
+    "TYO": ".T", "TSE": ".T", "JPX": ".T",
+    "KRX": ".KS", "KOSDAQ": ".KQ",
+    "TPE": ".TW", "TWSE": ".TW", "TWO": ".TWO",
+    "SGX": ".SI",
+    "SSE": ".SS", "SHA": ".SS", "SZSE": ".SZ", "SHE": ".SZ",
+    "BSE": ".BO", "NSE": ".NS",
+    # Continental Europe
+    "EPA": ".PA", "PAR": ".PA", "EURONEXT": ".PA",
+    "AMS": ".AS",
+    "BIT": ".MI", "MIL": ".MI", "MIB": ".MI",
+    "BME": ".MC", "MAD": ".MC",
+    "SIX": ".SW", "SWX": ".SW", "EBS": ".SW",
+    "VIE": ".VI",
+    "WSE": ".WA", "GPW": ".WA",
+    "OMX": ".ST", "OMXSTO": ".ST", "STO": ".ST",
+    "OMXCOP": ".CO", "CPH": ".CO",
+    "OMXHEX": ".HE", "HEL": ".HE",
+    "OSL": ".OL", "OBX": ".OL",
+    "BRU": ".BR",
+    "LIS": ".LS", "ELI": ".LS",
+    # Latin America
+    "BMFBOVESPA": ".SA", "BVMF": ".SA", "B3": ".SA",
+    "BMV": ".MX", "BIVA": ".MX",
+    "BCBA": ".BA", "BYMA": ".BA",
+}
+
+
+def parse_exchange_token(raw: str) -> Tuple[Optional[str], str]:
+    """Split 'EXCHANGE:SYMBOL' into (exchange_upper, symbol).
+    Returns (None, raw_stripped) if there is no ':' separator."""
+    s = (raw or "").strip()
+    if ":" not in s:
+        return None, s
+    exchange, _, symbol = s.partition(":")
+    exchange = exchange.strip().upper()
+    symbol = symbol.strip()
+    if not exchange or not symbol:
+        # Malformed — drop the lone colon and treat the rest as a bare symbol
+        return None, s.replace(":", "").strip()
+    return exchange, symbol
+
+
+def to_yf_symbol(raw: str) -> str:
+    """Resolve a raw input to its Yahoo Finance ticker.
+
+    Examples:
+        'XTRA:MUV2'  -> 'MUV2.DE'   (known prefix, suffix appended)
+        'NYSE:WES'   -> 'WES'       (US exchange, empty suffix)
+        'FOO:BAR'    -> 'BAR'       (unknown prefix, fallback to bare symbol)
+        'AAPL'       -> 'AAPL'      (no prefix, idempotent)
+        'MUV2.DE'    -> 'MUV2.DE'   (already resolved, idempotent)
+    """
+    exchange, symbol = parse_exchange_token(raw)
+    if exchange is None:
+        return symbol
+    suffix = EXCHANGE_TO_YF_SUFFIX.get(exchange)
+    if suffix is None:
+        return symbol  # unknown prefix → try bare symbol as US fallback
+    return f"{symbol}{suffix}" if suffix else symbol
 
 
 def normalize_text(s: str) -> str:
@@ -123,13 +203,18 @@ def lookup_info_for_symbol(symbol: str) -> Tuple[Optional[str], str]:
     """
     Returns (company_name, debug_info) for a given ticker symbol.
     Uses yf.Ticker(symbol).info to resolve longName / shortName.
+
+    Inputs of the form 'EXCHANGE:SYMBOL' (TradingView style) are resolved
+    via to_yf_symbol() before the yfinance call — e.g. 'XTRA:MUV2' is
+    queried as 'MUV2.DE'. Bare symbols pass through unchanged.
     """
     symbol = (symbol or "").strip()
     if not symbol:
         return None, "empty_symbol"
 
+    resolved = to_yf_symbol(symbol)
     try:
-        info = yf.Ticker(symbol).info
+        info = yf.Ticker(resolved).info
     except Exception as e:
         return None, f"info_error:{type(e).__name__}"
 

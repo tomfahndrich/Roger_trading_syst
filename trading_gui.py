@@ -20,6 +20,7 @@ if _HERE not in sys.path:
 from Roger_trading_yfinance_symbol.symbols_finder import (
     best_symbol_for_company,
     lookup_info_for_symbol,
+    to_yf_symbol,
 )
 
 # BASE_COLS from trading_signal_generator.py: ['datetime', 'signal', 'token', 'close price', 'CCI', 'stoch K', 'stoch D', 'slope K', 'slope D', 'ADX']
@@ -770,8 +771,11 @@ class TradingApp:
             company_name = None
             try:
                 if mode == "symbol":
-                    symbol = raw
-                    company_name, _dbg = lookup_info_for_symbol(raw)
+                    # Normalise EXCHANGE:SYMBOL (e.g. XTRA:MUV2 → MUV2.DE) so the
+                    # value stored in the symbols sheet is what trading_signal_generator
+                    # can fetch from yfinance downstream.
+                    symbol = to_yf_symbol(raw)
+                    company_name, _dbg = lookup_info_for_symbol(symbol)
                 else:
                     symbol, company_name, _dbg = best_symbol_for_company(raw)
             except Exception as e:
