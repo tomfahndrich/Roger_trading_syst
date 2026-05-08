@@ -294,3 +294,92 @@ class TestPersistTokenSource:
         # No new entry created, no exception
         assert "NONEXISTENT_TOKEN_XYZ" not in app.symbol_info
         assert app.symbol_info == before
+
+
+# ---------------------------------------------------------------------------
+# TokenTooltip._on_source_picked: Investing.com template prompts for list name
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def token_tooltip(monkeypatch):
+    """A real TokenTooltip instance attached to a withdrawn Tk root + Treeview.
+    Yields (tooltip, symbol_info, changes) where `changes` accumulates every
+    on_source_change(token, new_source) call."""
+    tk = pytest.importorskip("tkinter")
+    from tkinter import ttk
+    import trading_gui
+
+    root = tk.Tk()
+    root.withdraw()
+    tree = ttk.Treeview(root)
+
+    changes = []
+    sym_info = {}
+    tt = trading_gui.TokenTooltip(
+        tree, sym_info,
+        on_source_change=lambda token, src: changes.append((token, src)),
+        get_sources=lambda: ["Buffet videos", trading_gui.INVESTING_LIST_TEMPLATE],
+    )
+    yield tt, sym_info, changes
+    root.destroy()
+
+
+class TestSourcePickedInvestingTemplate:
+    def test_template_pick_prompts_and_concatenates_list_name(self, token_tooltip, monkeypatch):
+        tt, sym_info, changes = token_tooltip
+        sym_info["AAPL"] = {"source": "Original"}
+        monkeypatch.setattr(
+            "trading_gui.simpledialog.askstring",
+            lambda *a, **kw: "Tech Watchlist",
+        )
+        from trading_gui import INVESTING_LIST_TEMPLATE
+        tt._on_source_picked("AAPL", INVESTING_LIST_TEMPLATE)
+        assert changes == [("AAPL", "Investing.com - Tech Watchlist")]
+
+    def test_template_pick_with_empty_input_strips_suffix(self, token_tooltip, monkeypatch):
+        tt, sym_info, changes = token_tooltip
+        sym_info["AAPL"] = {"source": "Original"}
+        monkeypatch.setattr("trading_gui.simpledialog.askstring", lambda *a, **kw: "")
+        from trading_gui import INVESTING_LIST_TEMPLATE, INVESTING_PREFIX
+        tt._on_source_picked("AAPL", INVESTING_LIST_TEMPLATE)
+        assert changes == [("AAPL", INVESTING_PREFIX)]
+
+    def test_template_pick_cancelled_makes_no_change(self, token_tooltip, monkeypatch):
+        tt, sym_info, changes = token_tooltip
+        sym_info["AAPL"] = {"source": "Original"}
+        monkeypatch.setattr("trading_gui.simpledialog.askstring", lambda *a, **kw: None)
+        from trading_gui import INVESTING_LIST_TEMPLATE
+        tt._on_source_picked("AAPL", INVESTING_LIST_TEMPLATE)
+        assert changes == []
+
+    def test_template_pick_prefills_existing_list_name(self, token_tooltip, monkeypatch):
+        tt, sym_info, changes = token_tooltip
+        sym_info["AAPL"] = {"source": "Investing.com - Old List"}
+        captured = {}
+        def fake_askstring(*args, **kwargs):
+            captured["initialvalue"] = kwargs.get("initialvalue")
+            return "New List"
+        monkeypatch.setattr("trading_gui.simpledialog.askstring", fake_askstring)
+        from trading_gui import INVESTING_LIST_TEMPLATE
+        tt._on_source_picked("AAPL", INVESTING_LIST_TEMPLATE)
+        assert captured["initialvalue"] == "Old List"
+        assert changes == [("AAPL", "Investing.com - New List")]
+
+    def test_non_template_pick_skips_dialog(self, token_tooltip, monkeypatch):
+        """Picking a regular source must NOT call simpledialog at all."""
+        tt, sym_info, changes = token_tooltip
+        sym_info["AAPL"] = {"source": "Old"}
+        called = []
+        monkeypatch.setattr(
+            "trading_gui.simpledialog.askstring",
+            lambda *a, **kw: called.append(True) or "should-not-appear",
+        )
+        tt._on_source_picked("AAPL", "Buffet videos")
+        assert called == []
+        assert changes == [("AAPL", "Buffet videos")]
+
+    def test_picking_same_source_is_noop(self, token_tooltip):
+        tt, sym_info, changes = token_tooltip
+        sym_info["AAPL"] = {"source": "Buffet videos"}
+        tt._on_source_picked("AAPL", "Buffet videos")
+        assert changes == []

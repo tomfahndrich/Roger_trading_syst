@@ -4,7 +4,7 @@ import time
 import webbrowser
 import numpy as np
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, simpledialog
 import pandas as pd
 from trading_signal_generator import main as generate_signals, TIMEFRAMES, EXCEL_FILE, TRADE_COLS
 import threading
@@ -374,11 +374,28 @@ class TokenTooltip:
             menu.grab_release()
 
     def _on_source_picked(self, token, new_source):
-        """Forward the user's pick to the app and refresh the tooltip text."""
+        """Forward the user's pick to the app, prompting for a list name when
+        the Investing.com template is chosen."""
         if not self.on_source_change:
             return
-        # Skip no-op selections
         old = (self.symbol_info.get(token, {}) or {}).get("source", "")
+
+        # Investing.com - {NOM DE LA LISTE} → ask the user for the actual name.
+        # Pre-fill with the current list name if the existing source already
+        # matches the 'Investing.com - <name>' shape, so editing is a one-liner.
+        if new_source == INVESTING_LIST_TEMPLATE:
+            prefix = f"{INVESTING_PREFIX} - "
+            initial = old[len(prefix):] if old.startswith(prefix) else ""
+            list_name = simpledialog.askstring(
+                "Nom de la liste",
+                "Nom de la liste Investing.com\n(vide → 'Investing.com' tout court)",
+                initialvalue=initial,
+                parent=self.tree.winfo_toplevel(),
+            )
+            if list_name is None:
+                return  # cancelled — keep current source
+            new_source = build_source(INVESTING_LIST_TEMPLATE, list_name)
+
         if new_source == old:
             return
         self.on_source_change(token, new_source)
