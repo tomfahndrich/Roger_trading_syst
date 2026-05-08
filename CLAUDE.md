@@ -177,6 +177,8 @@ On every `generate_signals()` run, new signal data is merged with old data:
 | `_reload_symbol_info` | Re-read only the symbols sheet (refresh tooltip without disturbing Treeviews) |
 | `_refresh_available_sources` | Read `sources` sheet; bootstrap with `DEFAULT_SOURCES` if absent |
 | `_write_sources_sheet` | First-launch write of the sources sheet, preserving every other sheet |
+| `_update_token_source` | Tooltip Source-dropdown callback: update in-memory + spawn persist thread |
+| `_persist_token_source` | Background-thread: rewrite the row in symbols sheet (Source only) |
 
 ### Column Layout (per tab)
 
@@ -257,6 +259,16 @@ Single-column sheet (`Source Name`) driving the Add Tokens dropdown. Bootstrappe
 3. **`Symbols` column casing is preserved on update** (constant `UPDATABLE_SYMBOL_COLS` excludes it). The 4 metadata columns are always overwritten.
 4. **All writes go through temp file + `shutil.move`** for atomicity (same pattern as `save_data_to_excel`).
 5. **`DATA_LOCK` is held** during the read-modify-write cycle.
+
+### Editable Source via tooltip
+
+Hover any token in a timeframe tab → tooltip shows `Source: <value> ▾`. Click that line to open a radio-button menu listing every entry in `self.available_sources` (driven by the `sources` sheet of the xlsx). Picking a value:
+- Updates `self.symbol_info[token]['source']` synchronously on the main thread (next hover reflects it immediately)
+- Spawns a daemon thread that calls `_persist_token_source` → builds a single-row dict from cached `symbol_info` (so Company Name / Yahoo Finance URL / Source URL are preserved) → `_merge_into_symbols_sheet([row])` updates the matching row in place
+- Status bar shows `Source mise à jour : <token> → <new>`
+- A failed write (e.g. xlsx open in Excel) raises a messagebox
+
+The legacy source value (e.g. `TradingView`) is automatically prepended to the menu if it isn't in `available_sources`, so you can read its current value before swapping it out.
 
 ### Threading model
 

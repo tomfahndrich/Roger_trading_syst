@@ -223,3 +223,52 @@ class TestMergeIntoSymbolsSheet:
         assert row["Company Name"] == "Apple New"
         assert row["Source"] == "Raoul Pal"
         assert row["Source URL"] == "https://test/aapl"
+
+
+# ---------------------------------------------------------------------------
+# Integration: _persist_token_source (tooltip Source dropdown writeback)
+# ---------------------------------------------------------------------------
+
+class TestPersistTokenSource:
+    def test_updates_source_only_preserves_other_metadata(self, app, fixture_xlsx):
+        """Picking a new source from the tooltip must update Source in xlsx
+        without touching Company Name, Yahoo Finance URL, or Source URL."""
+        # Seed in-memory symbol_info so _persist_token_source has full context
+        # (the real flow loads this from xlsx in load_data).
+        app.symbol_info["AAPL"] = {
+            "company_name": "Apple Inc.",
+            "yf_url": "https://finance.yahoo.com/quote/AAPL/",
+            "source": "Original",
+            "source_url": "https://test/source-page",
+        }
+
+        # Direct synchronous call (matches what the daemon thread executes)
+        app._persist_token_source("AAPL", "Buffet videos")
+
+        sym = pd.read_excel(fixture_xlsx, sheet_name=SYMBOLS_SHEET)
+        row = sym[sym["Symbols"] == "AAPL"].iloc[0]
+        assert row["Source"] == "Buffet videos"
+        assert row["Company Name"] == "Apple Inc."
+        assert row["Yahoo Finance URL"] == "https://finance.yahoo.com/quote/AAPL/"
+        assert row["Source URL"] == "https://test/source-page"
+
+    def test_update_token_source_updates_in_memory_immediately(self, app):
+        """The user-facing entry point must reflect the change in symbol_info
+        before the background thread completes (so the next hover is accurate)."""
+        app.symbol_info["AAPL"] = {
+            "company_name": "Apple Inc.",
+            "yf_url": "https://finance.yahoo.com/quote/AAPL/",
+            "source": "Original",
+            "source_url": "",
+        }
+        app._update_token_source("AAPL", "Diallo videos")
+        # Synchronous in-memory update must be visible immediately
+        assert app.symbol_info["AAPL"]["source"] == "Diallo videos"
+
+    def test_unknown_token_is_silently_ignored(self, app):
+        """Defensive: a token not in symbol_info should not crash or persist."""
+        before = dict(app.symbol_info)
+        app._update_token_source("NONEXISTENT_TOKEN_XYZ", "Buffet videos")
+        # No new entry created, no exception
+        assert "NONEXISTENT_TOKEN_XYZ" not in app.symbol_info
+        assert app.symbol_info == before

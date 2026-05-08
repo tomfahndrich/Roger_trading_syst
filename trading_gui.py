@@ -206,14 +206,25 @@ class ToolTip:
 
 
 class TokenTooltip:
-    """Tooltip enrichi affiché au survol de la colonne 'token' d'un Treeview."""
+    """Tooltip enrichi affiché au survol de la colonne 'token' d'un Treeview.
 
-    def __init__(self, tree: ttk.Treeview, symbol_info: dict):
+    on_source_change(token, new_source) is invoked when the user clicks the
+    Source line and picks a value from the dropdown. get_sources() must return
+    the current list of available sources (typically backed by the xlsx).
+    Both callbacks are optional — if omitted, the Source line stays read-only.
+    """
+
+    def __init__(self, tree: ttk.Treeview, symbol_info: dict,
+                 on_source_change=None, get_sources=None):
         self.tree = tree
         self.symbol_info = symbol_info
+        self.on_source_change = on_source_change
+        self.get_sources = get_sources
         self.tooltip_window = None
         self.last_item = None
         self._hide_id = None
+        self._current_token = None  # token shown in the active tooltip
+        self._source_menu_var = None  # holds StringVar bound to the menu
         tree.bind("<Motion>", self.on_motion)
         tree.bind("<Leave>", self._schedule_hide)
 
@@ -284,6 +295,7 @@ class TokenTooltip:
         if self.tooltip_window:
             self.tooltip_window.destroy()
             self.tooltip_window = None
+        self._current_token = token
         win = tk.Toplevel(self.tree)
         win.wm_overrideredirect(True)
         win.wm_geometry(f"+{x}+{y}")
@@ -305,10 +317,64 @@ class TokenTooltip:
             src_lnk.bind("<Button-1>", lambda e, u=source_url: webbrowser.open(u))
         else:
             tk.Label(win, text="Source URL: -", bg="#FFFFDD", font=("Arial", 10), **pad).pack(fill="x")
-        tk.Label(win, text=f"Source:     {source}", bg="#FFFFDD", font=("Arial", 10),
-                 fg="black", padx=8, pady=2, anchor="w").pack(fill="x", pady=(0, 4))
+
+        # Source line — clickable if callbacks are wired (opens a popup menu)
+        editable = self.on_source_change is not None and self.get_sources is not None
+        src_label = tk.Label(
+            win,
+            text=f"Source:     {source}  ▾" if editable else f"Source:     {source}",
+            bg="#FFFFDD", font=("Arial", 10),
+            fg="black", cursor="hand2" if editable else "",
+            padx=8, pady=2, anchor="w",
+        )
+        src_label.pack(fill="x", pady=(0, 4))
+        if editable:
+            src_label.bind("<Button-1>", self._open_source_menu)
+
         win.update_idletasks()
         self.tooltip_window = win
+
+    def _open_source_menu(self, event):
+        """Pop a radio-button menu under the Source line, current value pre-selected."""
+        if not self.on_source_change or not self.get_sources:
+            return
+        sources = list(self.get_sources() or [])
+        if not sources:
+            return
+        token = self._current_token
+        if not token:
+            return
+
+        current = (self.symbol_info.get(token, {}) or {}).get("source", "") or ""
+        # Ensure the current source appears in the menu even if it's not in the
+        # canonical list anymore (legacy sources like 'TradingView')
+        menu_sources = list(sources)
+        if current and current not in menu_sources:
+            menu_sources.insert(0, current)
+
+        menu = tk.Menu(self.tooltip_window, tearoff=0)
+        self._source_menu_var = tk.StringVar(value=current)
+        for src in menu_sources:
+            menu.add_radiobutton(
+                label=src,
+                value=src,
+                variable=self._source_menu_var,
+                command=lambda s=src, t=token: self._on_source_picked(t, s),
+            )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _on_source_picked(self, token, new_source):
+        """Forward the user's pick to the app and refresh the tooltip text."""
+        if not self.on_source_change:
+            return
+        # Skip no-op selections
+        old = (self.symbol_info.get(token, {}) or {}).get("source", "")
+        if new_source == old:
+            return
+        self.on_source_change(token, new_source)
 
     def hide(self, event=None):
         self._schedule_hide(event)
@@ -601,7 +667,12 @@ class TradingApp:
             tree.tag_configure('cross', background='#FFD580')  # Light orange for CROSS
             # Enable editing the notes column
             tree.bind("<Double-1>", self.on_double_click)
-            TokenTooltip(tree, self.symbol_info)
+            TokenTooltip(
+                tree,
+                self.symbol_info,
+                on_source_change=self._update_token_source,
+                get_sources=lambda: self.available_sources,
+            )
 
         # Build Add Tokens tab (after timeframe tabs)
         self._build_add_tokens_tab()
@@ -876,6 +947,45 @@ class TradingApp:
         if added or updated:
             self.tokens_text.delete("1.0", tk.END)
         messagebox.showinfo("Add Tokens", "\n".join(summary_lines))
+
+    def _update_token_source(self, token, new_source):
+        """Tooltip callback — user picked a new source from the dropdown.
+        Updates symbol_info immediately so the next hover reflects the change,
+        then persists in a background thread (file I/O can be slow if Excel
+        is open in another app)."""
+        token = (token or "").strip()
+        new_source = (new_source or "").strip()
+        if not token or token not in self.symbol_info:
+            return
+        self.symbol_info[token]["source"] = new_source
+        self.status_var.set(f"Source mise à jour : {token} → {new_source}")
+        threading.Thread(
+            target=self._persist_token_source,
+            args=(token, new_source),
+            daemon=True,
+        ).start()
+
+    def _persist_token_source(self, token, new_source):
+        """Background-thread: rewrite the row in the symbols sheet, preserving
+        all other metadata columns by reading them from self.symbol_info first."""
+        info = self.symbol_info.get(token, {}) or {}
+        row = {
+            "Symbols": token,
+            "Company Name": info.get("company_name", "") or "",
+            "Yahoo Finance URL": info.get("yf_url", "") or "",
+            "Source": new_source,
+            "Source URL": info.get("source_url", "") or "",
+        }
+        try:
+            self._merge_into_symbols_sheet([row])
+        except Exception as e:
+            self.root.after(
+                0,
+                lambda err=e: messagebox.showerror(
+                    "Update Source",
+                    f"Erreur lors de la mise à jour de la source pour {token} : {err}",
+                ),
+            )
 
     def _reload_symbol_info(self):
         """Re-read the symbols sheet to refresh tooltip metadata without disturbing
