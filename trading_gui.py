@@ -335,7 +335,14 @@ class TokenTooltip:
         self.tooltip_window = win
 
     def _open_source_menu(self, event):
-        """Pop a radio-button menu under the Source line, current value pre-selected."""
+        """Pop a radio-button menu under the Source line, current value pre-selected.
+
+        The menu is parented on the tree's toplevel — NOT on self.tooltip_window —
+        so it survives the tooltip's hide cycle. Without this, moving the mouse
+        from the tooltip to the menu would trigger _schedule_hide → _do_hide →
+        tooltip Toplevel destruction → child Menu destruction (Tk parent rule),
+        making lower menu items unreachable.
+        """
         if not self.on_source_change or not self.get_sources:
             return
         sources = list(self.get_sources() or [])
@@ -352,7 +359,7 @@ class TokenTooltip:
         if current and current not in menu_sources:
             menu_sources.insert(0, current)
 
-        menu = tk.Menu(self.tooltip_window, tearoff=0)
+        menu = tk.Menu(self.tree.winfo_toplevel(), tearoff=0)
         self._source_menu_var = tk.StringVar(value=current)
         for src in menu_sources:
             menu.add_radiobutton(
