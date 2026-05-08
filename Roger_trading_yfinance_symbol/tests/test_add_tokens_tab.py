@@ -252,9 +252,21 @@ class TestPersistTokenSource:
         assert row["Yahoo Finance URL"] == "https://finance.yahoo.com/quote/AAPL/"
         assert row["Source URL"] == "https://test/source-page"
 
-    def test_update_token_source_updates_in_memory_immediately(self, app):
+    def test_update_token_source_updates_in_memory_immediately(self, app, monkeypatch):
         """The user-facing entry point must reflect the change in symbol_info
-        before the background thread completes (so the next hover is accurate)."""
+        before the background thread completes (so the next hover is accurate).
+
+        We MUST stub _persist_token_source: the daemon thread it spawns can
+        outlive both this test and the monkeypatch teardown that restores
+        EXCEL_FILE — if it writes via the unpatched path, it overwrites the
+        user's real xlsx. Stubbing keeps the thread effectively a no-op.
+        """
+        persist_calls = []
+        monkeypatch.setattr(
+            app, "_persist_token_source",
+            lambda token, src: persist_calls.append((token, src)),
+        )
+
         app.symbol_info["AAPL"] = {
             "company_name": "Apple Inc.",
             "yf_url": "https://finance.yahoo.com/quote/AAPL/",
@@ -262,8 +274,18 @@ class TestPersistTokenSource:
             "source_url": "",
         }
         app._update_token_source("AAPL", "Diallo videos")
+
         # Synchronous in-memory update must be visible immediately
         assert app.symbol_info["AAPL"]["source"] == "Diallo videos"
+
+        # Persist was scheduled with the correct args (the thread may or may not
+        # have run yet, so wait briefly for it to invoke our stub).
+        import time
+        for _ in range(20):
+            if persist_calls:
+                break
+            time.sleep(0.05)
+        assert persist_calls == [("AAPL", "Diallo videos")]
 
     def test_unknown_token_is_silently_ignored(self, app):
         """Defensive: a token not in symbol_info should not crash or persist."""
