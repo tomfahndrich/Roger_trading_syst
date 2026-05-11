@@ -34,10 +34,12 @@ ALL_NEW_ORDER_APPEND = TRADE_COLS_GUI
 # Symbols sheet schema (constants — single source of truth)
 SYMBOLS_SHEET = 'symbols'
 SOURCES_SHEET = 'sources'
-SYMBOLS_COLS = ['Symbols', 'Company Name', 'Yahoo Finance URL', 'Source', 'Source URL']
+SYMBOLS_COLS = ['Symbols', 'Company Name', 'Yahoo Finance URL', 'Source', 'Source URL',
+                'Watchlist URL', 'Watchlist Name']
 # Columns updated on duplicate match. 'Symbols' is the row's identity and its
 # original casing is preserved across updates.
-UPDATABLE_SYMBOL_COLS = ['Company Name', 'Yahoo Finance URL', 'Source', 'Source URL']
+UPDATABLE_SYMBOL_COLS = ['Company Name', 'Yahoo Finance URL', 'Source', 'Source URL',
+                         'Watchlist URL', 'Watchlist Name']
 
 # Default source list for the Add Tokens dropdown. Written to the `sources` sheet
 # on first launch if absent; thereafter the xlsx is the source of truth so the
@@ -54,6 +56,20 @@ INVESTING_LIST_TEMPLATE = "Investing.com - {NOM DE LA LISTE}"
 INVESTING_PREFIX = "Investing.com"
 
 DATA_LOCK = threading.Lock()
+
+
+def _safe_str(val):
+    """Return '' for None / NaN / the literal string 'nan' (a common artefact
+    of pandas reading missing cells), otherwise str(val).strip()."""
+    if val is None:
+        return ""
+    try:
+        if pd.isna(val):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    s = str(val).strip()
+    return "" if s.lower() == "nan" else s
 
 
 def parse_tokens(text):
@@ -253,6 +269,8 @@ class TokenTooltip:
                    info.get("company_name") or "-",
                    info.get("yf_url") or "",
                    info.get("source_url") or "",
+                   info.get("watchlist_url") or "",
+                   info.get("watchlist_name") or "",
                    info.get("source") or "-",
                    event.x_root + 15, event.y_root + 15)
 
@@ -291,7 +309,7 @@ class TokenTooltip:
             self.tooltip_window.destroy()
             self.tooltip_window = None
 
-    def _show(self, token, company, yf_url, source_url, source, x, y):
+    def _show(self, token, company, yf_url, source_url, watchlist_url, watchlist_name, source, x, y):
         if self.tooltip_window:
             self.tooltip_window.destroy()
             self.tooltip_window = None
@@ -318,6 +336,9 @@ class TokenTooltip:
         else:
             tk.Label(win, text="Source URL: -", bg="#FFFFDD", font=("Arial", 10), **pad).pack(fill="x")
 
+        # Watchlist line — adaptive: URL only / Name only / URL - Name / dash
+        self._render_watchlist_line(win, watchlist_url, watchlist_name, pad)
+
         # Source line — clickable if callbacks are wired (opens a popup menu)
         editable = self.on_source_change is not None and self.get_sources is not None
         src_label = tk.Label(
@@ -333,6 +354,38 @@ class TokenTooltip:
 
         win.update_idletasks()
         self.tooltip_window = win
+
+    def _render_watchlist_line(self, win, url, name, pad):
+        """Adaptive Watchlist line:
+            both filled  → 'Watchlist:  <URL clickable> - <name>'
+            URL only     → 'Watchlist:  <URL clickable>'
+            Name only    → 'Watchlist:  <name>'
+            both empty   → 'Watchlist:  -'
+        """
+        if not url and not name:
+            tk.Label(win, text="Watchlist:  -", bg="#FFFFDD", font=("Arial", 10), **pad).pack(fill="x")
+            return
+        if url and not name:
+            lbl = tk.Label(win, text=f"Watchlist:  {url}", bg="#FFFFDD",
+                           font=("Arial", 10), fg="blue", cursor="hand2",
+                           padx=8, pady=2, anchor="w")
+            lbl.pack(fill="x")
+            lbl.bind("<Button-1>", lambda e, u=url: webbrowser.open(u))
+            return
+        if name and not url:
+            tk.Label(win, text=f"Watchlist:  {name}", bg="#FFFFDD",
+                     font=("Arial", 10), **pad).pack(fill="x")
+            return
+        # Both filled: URL clickable, name plain text after a dash
+        row = tk.Frame(win, bg="#FFFFDD")
+        row.pack(fill="x")
+        url_lbl = tk.Label(row, text=f"Watchlist:  {url}", bg="#FFFFDD",
+                           font=("Arial", 10), fg="blue", cursor="hand2",
+                           padx=8, pady=2, anchor="w")
+        url_lbl.pack(side=tk.LEFT)
+        url_lbl.bind("<Button-1>", lambda e, u=url: webbrowser.open(u))
+        tk.Label(row, text=f" - {name}", bg="#FFFFDD", font=("Arial", 10),
+                 fg="black", padx=0, pady=2, anchor="w").pack(side=tk.LEFT)
 
     def _open_source_menu(self, event):
         """Pop a radio-button menu under the Source line, current value pre-selected.
@@ -718,13 +771,33 @@ class TradingApp:
         container.pack(fill=tk.BOTH, expand=True)
 
         # --- URL field (optional)
-        url_frame = tk.LabelFrame(container, text=" URL (optionnel) ",
+        url_frame = tk.LabelFrame(container, text=" URL (optionnel) - ProPicks AI, Youtube, Article ",
                                   font=("Arial", 10, "bold"), padx=10, pady=8)
         url_frame.pack(fill=tk.X, pady=(0, 8))
         self.url_var = tk.StringVar()
         url_entry = tk.Entry(url_frame, textvariable=self.url_var, width=80)
         url_entry.pack(fill=tk.X)
         ToolTip(url_entry, "URL de la page d'origine — apparaît dans le tooltip des tokens. Vide = trait dans le tooltip.")
+
+        # --- Watchlist URL + Name (both optional)
+        wl_frame = tk.LabelFrame(container, text=" Watchlist (optionnel) ",
+                                 font=("Arial", 10, "bold"), padx=10, pady=8)
+        wl_frame.pack(fill=tk.X, pady=(0, 8))
+        wl_url_row = tk.Frame(wl_frame)
+        wl_url_row.pack(fill=tk.X, pady=(0, 4))
+        tk.Label(wl_url_row, text="URL :", width=6, anchor="w").pack(side=tk.LEFT)
+        self.watchlist_url_var = tk.StringVar()
+        wl_url_entry = tk.Entry(wl_url_row, textvariable=self.watchlist_url_var)
+        wl_url_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ToolTip(wl_url_entry, "URL de la watchlist (Investing.com, TradingView, etc.). Cliquable dans le tooltip des tokens.")
+
+        wl_name_row = tk.Frame(wl_frame)
+        wl_name_row.pack(fill=tk.X)
+        tk.Label(wl_name_row, text="Nom :", width=6, anchor="w").pack(side=tk.LEFT)
+        self.watchlist_name_var = tk.StringVar()
+        wl_name_entry = tk.Entry(wl_name_row, textvariable=self.watchlist_name_var)
+        wl_name_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ToolTip(wl_name_entry, "Nom lisible de la watchlist. Affiché dans le tooltip après l'URL : 'URL - Nom'.")
 
         # --- Mode selector (radio: symbol vs name)
         mode_frame = tk.LabelFrame(container, text=" Mode d'entrée ",
@@ -839,6 +912,8 @@ class TradingApp:
         mode = self.mode_var.get()
         source = build_source(self.source_var.get(), self.list_name_var.get())
         url = self.url_var.get().strip()
+        watchlist_url = self.watchlist_url_var.get().strip()
+        watchlist_name = self.watchlist_name_var.get().strip()
         if not source:
             messagebox.showwarning("Add Tokens", "Sélectionne une source dans le menu déroulant.")
             return
@@ -851,11 +926,11 @@ class TradingApp:
 
         threading.Thread(
             target=self._add_tokens_worker,
-            args=(tokens, mode, source, url),
+            args=(tokens, mode, source, url, watchlist_url, watchlist_name),
             daemon=True,
         ).start()
 
-    def _add_tokens_worker(self, tokens, mode, source, url):
+    def _add_tokens_worker(self, tokens, mode, source, url, watchlist_url="", watchlist_name=""):
         """Background: resolve each entry via yfinance, then atomically merge into xlsx.
         UI updates are dispatched back to the main thread via root.after()."""
         success_rows = []
@@ -888,6 +963,8 @@ class TradingApp:
                     "Yahoo Finance URL": yf_url,
                     "Source": source,
                     "Source URL": url,
+                    "Watchlist URL": watchlist_url,
+                    "Watchlist Name": watchlist_name,
                 })
                 self.root.after(0, self._log_append,
                                 f"[{i}/{total}] {raw!r} → {symbol}  ({company_name})")
@@ -999,6 +1076,8 @@ class TradingApp:
             "Yahoo Finance URL": info.get("yf_url", "") or "",
             "Source": new_source,
             "Source URL": info.get("source_url", "") or "",
+            "Watchlist URL": info.get("watchlist_url", "") or "",
+            "Watchlist Name": info.get("watchlist_name", "") or "",
         }
         try:
             self._merge_into_symbols_sheet([row])
@@ -1022,13 +1101,15 @@ class TradingApp:
         except Exception:
             return
         for _, row in sym_df.iterrows():
-            token = str(row.get("Symbols", "") or "").strip()
+            token = _safe_str(row.get("Symbols"))
             if token:
                 self.symbol_info[token] = {
-                    "company_name": str(row.get("Company Name", "") or "").strip(),
-                    "yf_url": str(row.get("Yahoo Finance URL", "") or "").strip(),
-                    "source": str(row.get("Source", "") or "").strip(),
-                    "source_url": str(row.get("Source URL", "") or "").strip(),
+                    "company_name": _safe_str(row.get("Company Name")),
+                    "yf_url": _safe_str(row.get("Yahoo Finance URL")),
+                    "source": _safe_str(row.get("Source")),
+                    "source_url": _safe_str(row.get("Source URL")),
+                    "watchlist_url": _safe_str(row.get("Watchlist URL")),
+                    "watchlist_name": _safe_str(row.get("Watchlist Name")),
                 }
 
     def load_data(self):
@@ -1095,18 +1176,20 @@ class TradingApp:
                 self.status_var.set(f"{EXCEL_FILE} not found.")
                 # self.data is already initialized with empty structured DataFrames
 
-            # Load symbol metadata for tooltips (incl. new Source URL column)
+            # Load symbol metadata for tooltips (incl. Source URL + Watchlist URL/Name)
             self.symbol_info.clear()
             try:
                 sym_df = pd.read_excel(EXCEL_FILE, sheet_name=SYMBOLS_SHEET)
                 for _, row in sym_df.iterrows():
-                    token = str(row.get("Symbols", "") or "").strip()
+                    token = _safe_str(row.get("Symbols"))
                     if token:
                         self.symbol_info[token] = {
-                            "company_name": str(row.get("Company Name", "") or "").strip(),
-                            "yf_url": str(row.get("Yahoo Finance URL", "") or "").strip(),
-                            "source": str(row.get("Source", "") or "").strip(),
-                            "source_url": str(row.get("Source URL", "") or "").strip(),
+                            "company_name": _safe_str(row.get("Company Name")),
+                            "yf_url": _safe_str(row.get("Yahoo Finance URL")),
+                            "source": _safe_str(row.get("Source")),
+                            "source_url": _safe_str(row.get("Source URL")),
+                            "watchlist_url": _safe_str(row.get("Watchlist URL")),
+                            "watchlist_name": _safe_str(row.get("Watchlist Name")),
                         }
             except Exception:
                 pass
