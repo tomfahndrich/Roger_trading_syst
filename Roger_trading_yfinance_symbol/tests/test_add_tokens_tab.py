@@ -33,6 +33,7 @@ from trading_gui import (
     SOURCES_SHEET,
     INVESTING_LIST_TEMPLATE,
     INVESTING_PREFIX,
+    NEW_SOURCE_SENTINEL,
 )
 
 
@@ -383,3 +384,277 @@ class TestSourcePickedInvestingTemplate:
         sym_info["AAPL"] = {"source": "Buffet videos"}
         tt._on_source_picked("AAPL", "Buffet videos")
         assert changes == []
+
+
+# ---------------------------------------------------------------------------
+# Mod 1 — Watchlist URL/Name: schema + tooltip rendering
+# ---------------------------------------------------------------------------
+
+class TestWatchlistColumns:
+    def test_merge_persists_watchlist_url_and_name(self, app, fixture_xlsx):
+        rows = [{
+            "Symbols": "WLTOKEN", "Company Name": "Watchlist Co.",
+            "Yahoo Finance URL": "https://yf/WLTOKEN/",
+            "Source": "Buffet videos", "Source URL": "",
+            "Watchlist URL": "https://invest.com/list/42",
+            "Watchlist Name": "Tech Stocks",
+        }]
+        added, updated = app._merge_into_symbols_sheet(rows)
+        assert (added, updated) == (1, 0)
+
+        sym = pd.read_excel(fixture_xlsx, sheet_name=SYMBOLS_SHEET)
+        assert "Watchlist URL" in sym.columns
+        assert "Watchlist Name" in sym.columns
+        new = sym[sym["Symbols"] == "WLTOKEN"].iloc[0]
+        assert new["Watchlist URL"] == "https://invest.com/list/42"
+        assert new["Watchlist Name"] == "Tech Stocks"
+
+    def test_merge_preserves_watchlist_on_source_only_update(self, app, fixture_xlsx):
+        """Updating just the Source from the tooltip MUST NOT wipe Watchlist
+        data. _persist_token_source rebuilds the row from cached symbol_info."""
+        # Seed full row
+        app.symbol_info["AAPL"] = {
+            "company_name": "Apple Inc.",
+            "yf_url": "https://finance.yahoo.com/quote/AAPL/",
+            "source": "Original",
+            "source_url": "https://x",
+            "watchlist_url": "https://my-list",
+            "watchlist_name": "Big Tech",
+        }
+        app._persist_token_source("AAPL", "New Source")
+        sym = pd.read_excel(fixture_xlsx, sheet_name=SYMBOLS_SHEET)
+        row = sym[sym["Symbols"] == "AAPL"].iloc[0]
+        assert row["Source"] == "New Source"
+        assert row["Watchlist URL"] == "https://my-list"
+        assert row["Watchlist Name"] == "Big Tech"
+
+
+class TestWatchlistTooltipRendering:
+    """Inspect the widgets _render_watchlist_line packs for the 4 cases."""
+
+    @pytest.fixture
+    def render_target(self, token_tooltip):
+        tt, _, _ = token_tooltip
+        import tkinter as tk
+        win = tk.Toplevel(tt.tree)
+        pad = {"padx": 8, "pady": 2, "anchor": "w", "fg": "black"}
+        yield tt, win, pad
+        win.destroy()
+
+    def _label_texts(self, container):
+        """Recursively gather texts of all Label children."""
+        import tkinter as tk
+        out = []
+        for child in container.winfo_children():
+            if isinstance(child, tk.Label):
+                out.append(child.cget("text"))
+            else:
+                out.extend(self._label_texts(child))
+        return out
+
+    def test_both_empty_renders_dash(self, render_target):
+        tt, win, pad = render_target
+        tt._render_watchlist_line(win, "", "", pad)
+        assert self._label_texts(win) == ["Watchlist:  -"]
+
+    def test_url_only(self, render_target):
+        tt, win, pad = render_target
+        tt._render_watchlist_line(win, "https://x", "", pad)
+        assert self._label_texts(win) == ["Watchlist:  https://x"]
+
+    def test_name_only(self, render_target):
+        tt, win, pad = render_target
+        tt._render_watchlist_line(win, "", "Tech", pad)
+        assert self._label_texts(win) == ["Watchlist:  Tech"]
+
+    def test_both_filled_renders_url_dash_name(self, render_target):
+        tt, win, pad = render_target
+        tt._render_watchlist_line(win, "https://x", "Tech", pad)
+        # Frame with two labels: URL clickable + " - Tech"
+        assert self._label_texts(win) == ["Watchlist:  https://x", " - Tech"]
+
+
+# ---------------------------------------------------------------------------
+# Mod 2a — _register_new_source + sentinel pick flow
+# ---------------------------------------------------------------------------
+
+class TestRegisterNewSource:
+    def test_appends_to_sources_sheet_and_in_memory_list(self, app, fixture_xlsx):
+        before = list(app.available_sources)
+        app._register_new_source("My YouTube Channel")
+        assert "My YouTube Channel" in app.available_sources
+        assert app.available_sources == before + ["My YouTube Channel"]
+
+        src = pd.read_excel(fixture_xlsx, sheet_name=SOURCES_SHEET)
+        assert "My YouTube Channel" in src.iloc[:, 0].tolist()
+
+    def test_idempotent_on_existing_name(self, app):
+        app._register_new_source("Buffet videos")  # already in defaults
+        # Count occurrences in the list
+        assert app.available_sources.count("Buffet videos") == 1
+
+    def test_empty_name_is_noop(self, app):
+        before = list(app.available_sources)
+        app._register_new_source("")
+        app._register_new_source("   ")
+        app._register_new_source(None)
+        assert app.available_sources == before
+
+    def test_sentinel_is_silently_rejected(self, app):
+        """Defensive: if the sentinel ever gets passed in, never persist it."""
+        before = list(app.available_sources)
+        app._register_new_source(NEW_SOURCE_SENTINEL)
+        assert app.available_sources == before
+
+    def test_combobox_values_refreshed_with_sentinel_at_end(self, app):
+        app._register_new_source("Brand New Source")
+        values = list(app.source_combobox["values"])
+        assert "Brand New Source" in values
+        assert values[-1] == NEW_SOURCE_SENTINEL
+
+
+@pytest.fixture
+def token_tooltip_with_register(monkeypatch):
+    """Like token_tooltip but also wires register_new_source. Yields 4-tuple."""
+    tk = pytest.importorskip("tkinter")
+    from tkinter import ttk
+    import trading_gui
+    root = tk.Tk()
+    root.withdraw()
+    tree = ttk.Treeview(root)
+    changes = []
+    registered = []
+    sym_info = {}
+    tt = trading_gui.TokenTooltip(
+        tree, sym_info,
+        on_source_change=lambda token, src: changes.append((token, src)),
+        get_sources=lambda: ["Buffet videos", trading_gui.INVESTING_LIST_TEMPLATE],
+        register_new_source=lambda name: registered.append(name),
+    )
+    yield tt, sym_info, changes, registered
+    root.destroy()
+
+
+class TestTooltipNewSourceSentinel:
+    def test_pick_sentinel_prompts_registers_and_uses_new_name(
+        self, token_tooltip_with_register, monkeypatch
+    ):
+        tt, sym_info, changes, registered = token_tooltip_with_register
+        sym_info["AAPL"] = {"source": "Original"}
+        monkeypatch.setattr(
+            "trading_gui.simpledialog.askstring",
+            lambda *a, **kw: "Cathie Wood",
+        )
+        tt._on_source_picked("AAPL", NEW_SOURCE_SENTINEL)
+        assert registered == ["Cathie Wood"]
+        assert changes == [("AAPL", "Cathie Wood")]
+
+    def test_pick_sentinel_cancelled_does_nothing(
+        self, token_tooltip_with_register, monkeypatch
+    ):
+        tt, sym_info, changes, registered = token_tooltip_with_register
+        sym_info["AAPL"] = {"source": "Original"}
+        monkeypatch.setattr("trading_gui.simpledialog.askstring", lambda *a, **kw: None)
+        tt._on_source_picked("AAPL", NEW_SOURCE_SENTINEL)
+        assert registered == []
+        assert changes == []
+
+    def test_pick_sentinel_empty_string_does_nothing(
+        self, token_tooltip_with_register, monkeypatch
+    ):
+        tt, sym_info, changes, registered = token_tooltip_with_register
+        sym_info["AAPL"] = {"source": "Original"}
+        monkeypatch.setattr("trading_gui.simpledialog.askstring", lambda *a, **kw: "   ")
+        tt._on_source_picked("AAPL", NEW_SOURCE_SENTINEL)
+        assert registered == []
+        assert changes == []
+
+    def test_open_source_menu_appends_sentinel_when_register_wired(
+        self, token_tooltip_with_register
+    ):
+        """The sentinel must be the LAST item of the menu when register is wired."""
+        tt, sym_info, _, _ = token_tooltip_with_register
+        sym_info["AAPL"] = {"source": "Buffet videos"}
+        tt._current_token = "AAPL"
+
+        # Stub tk_popup so it doesn't actually display; capture the menu
+        import tkinter as tk
+        captured = {}
+        original_init = tk.Menu.__init__
+        def patched_init(self, *args, **kwargs):
+            original_init(self, *args, **kwargs)
+            captured["menu"] = self
+        tk.Menu.__init__ = patched_init
+        try:
+            class FakeEvent:
+                x_root = 0
+                y_root = 0
+            try:
+                tt._open_source_menu(FakeEvent())
+            except Exception:
+                pass  # tk_popup may fail in headless contexts
+        finally:
+            tk.Menu.__init__ = original_init
+
+        menu = captured.get("menu")
+        assert menu is not None
+        # Walk menu items
+        last_idx = menu.index("end")
+        labels = [menu.entrycget(i, "label") for i in range(last_idx + 1)]
+        assert labels[-1] == NEW_SOURCE_SENTINEL
+
+
+# ---------------------------------------------------------------------------
+# Mod 2b — Investing.com composite auto-registers after persist
+# ---------------------------------------------------------------------------
+
+class TestInvestingCompositeAutoPersist:
+    def test_persist_token_source_with_investing_composite_calls_register(
+        self, app, fixture_xlsx, monkeypatch
+    ):
+        """When _persist_token_source writes a Source like 'Investing.com - Tech',
+        it must schedule _register_new_source on the main thread."""
+        app.symbol_info["AAPL"] = {
+            "company_name": "Apple Inc.",
+            "yf_url": "https://yf/AAPL/",
+            "source": "Original",
+            "source_url": "",
+            "watchlist_url": "",
+            "watchlist_name": "",
+        }
+
+        # Capture root.after scheduled callbacks (run them synchronously)
+        scheduled = []
+        def fake_after(delay, fn, *args):
+            scheduled.append((fn, args))
+            fn(*args)
+        monkeypatch.setattr(app.root, "after", fake_after)
+
+        app._persist_token_source("AAPL", "Investing.com - Tech Stocks")
+
+        # _register_new_source should have been called with the composite
+        register_calls = [args for fn, args in scheduled if fn == app._register_new_source]
+        assert register_calls == [("Investing.com - Tech Stocks",)]
+        assert "Investing.com - Tech Stocks" in app.available_sources
+
+    def test_persist_token_source_with_non_investing_skips_register(
+        self, app, fixture_xlsx, monkeypatch
+    ):
+        app.symbol_info["AAPL"] = {
+            "company_name": "Apple Inc.", "yf_url": "https://yf/AAPL/",
+            "source": "Original", "source_url": "",
+            "watchlist_url": "", "watchlist_name": "",
+        }
+        scheduled = []
+        def fake_after(delay, fn, *args):
+            scheduled.append((fn, args))
+            fn(*args)
+        monkeypatch.setattr(app.root, "after", fake_after)
+
+        before = list(app.available_sources)
+        app._persist_token_source("AAPL", "Buffet videos")
+        # Buffet videos already in defaults → register would no-op anyway,
+        # but more importantly it should NOT be scheduled at all
+        register_calls = [args for fn, args in scheduled if fn == app._register_new_source]
+        assert register_calls == []
+        assert app.available_sources == before
