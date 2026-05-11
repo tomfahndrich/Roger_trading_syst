@@ -175,10 +175,11 @@ On every `generate_signals()` run, new signal data is merged with old data:
 | `_merge_into_symbols_sheet` | Atomic xlsx merge: mutates ONLY symbols sheet, preserves all others |
 | `_on_add_complete` | Main-thread callback: re-enable UI, refresh tooltip metadata, summary |
 | `_reload_symbol_info` | Re-read only the symbols sheet (refresh tooltip without disturbing Treeviews) |
-| `_refresh_available_sources` | Read `sources` sheet; bootstrap with `DEFAULT_SOURCES` if absent |
+| `_refresh_available_sources` | Read `sources` sheet; bootstrap with `DEFAULT_SOURCES` if absent; filter out sentinel; refresh combobox with sentinel appended |
 | `_write_sources_sheet` | First-launch write of the sources sheet, preserving every other sheet |
+| `_register_new_source` | Idempotent: append a source to `sources` sheet + refresh combobox. No-op for empty/sentinel/existing names. |
 | `_update_token_source` | Tooltip Source-dropdown callback: update in-memory + spawn persist thread |
-| `_persist_token_source` | Background-thread: rewrite the row in symbols sheet (Source only) |
+| `_persist_token_source` | Background-thread: rewrite the row in symbols sheet (Source only, all other metadata preserved from cached `symbol_info`); auto-registers `Investing.com - X` composites after success |
 
 ### Column Layout (per tab)
 
@@ -235,14 +236,14 @@ All filters apply simultaneously via `apply_all_filters()`. Filters operate on t
 
 ### `symbols` sheet schema (post-migration)
 
-| Symbols | Company Name | Yahoo Finance URL | Source | Source URL *(NEW)* |
-|---|---|---|---|---|
+| Symbols | Company Name | Yahoo Finance URL | Source | Source URL | Watchlist URL | Watchlist Name |
+|---|---|---|---|---|---|---|
 
-The `Source URL` column is created on first write by `_merge_into_symbols_sheet`. Legacy rows are left intact and gain an empty `Source URL` value.
+New columns are auto-created on first write by `_merge_into_symbols_sheet` (the function is column-agnostic — it reindexes against `SYMBOLS_COLS`). Legacy rows are left intact and gain empty values for new columns. **NaN cells from pandas missing values are normalized to `""` via the module-level `_safe_str()` helper** when loading into `self.symbol_info` — without this, the tooltip showed `"nan"` for missing optional fields.
 
 ### `sources` sheet (5th sheet of `trading_synthesis.xlsx`)
 
-Single-column sheet (`Source Name`) driving the Add Tokens dropdown. Bootstrapped on first launch from `DEFAULT_SOURCES`. Editable directly in Excel — the user can add/remove sources without touching code.
+Single-column sheet (`Source Name`) driving the Add Tokens dropdown and the tooltip Source menu. Bootstrapped on first launch from `DEFAULT_SOURCES`. **Grows organically with usage**: every new source picked via "+ Nouvelle source..." or every new `Investing.com - X` composite is appended via `_register_new_source` (idempotent). Editable directly in Excel.
 
 ### Pure helpers (module-level, importable for tests)
 
@@ -260,15 +261,37 @@ Single-column sheet (`Source Name`) driving the Add Tokens dropdown. Bootstrappe
 4. **All writes go through temp file + `shutil.move`** for atomicity (same pattern as `save_data_to_excel`).
 5. **`DATA_LOCK` is held** during the read-modify-write cycle.
 
+### Tooltip layout (post-Watchlist)
+
+```
+Symbol:     AAPL
+Company:    Apple Inc.
+URL:        https://finance.yahoo.com/quote/AAPL/   ← Yahoo Finance, clickable
+Source URL: https://www.investing.com/...           ← User-entered "URL" field, clickable
+Watchlist:  https://my-list - Tech Stocks          ← Watchlist URL (clickable) + " - " + Name
+Source:     Buffet videos  ▾                       ← clickable, opens dropdown menu
+```
+
+Watchlist line is rendered by `TokenTooltip._render_watchlist_line` adaptively:
+- Both filled → `Watchlist:  <URL clickable> - <name>` (Frame with two Labels)
+- URL only   → `Watchlist:  <URL clickable>` (single clickable Label)
+- Name only  → `Watchlist:  <name>` (single static Label)
+- Both empty → `Watchlist:  -`
+
 ### Editable Source via tooltip
 
-Hover any token in a timeframe tab → tooltip shows `Source: <value> ▾`. Click that line to open a radio-button menu listing every entry in `self.available_sources` (driven by the `sources` sheet of the xlsx). Picking a value:
-- Updates `self.symbol_info[token]['source']` synchronously on the main thread (next hover reflects it immediately)
-- Spawns a daemon thread that calls `_persist_token_source` → builds a single-row dict from cached `symbol_info` (so Company Name / Yahoo Finance URL / Source URL are preserved) → `_merge_into_symbols_sheet([row])` updates the matching row in place
-- Status bar shows `Source mise à jour : <token> → <new>`
-- A failed write (e.g. xlsx open in Excel) raises a messagebox
+Click the `Source: ... ▾` line to open a radio-button menu listing every entry in `self.available_sources` (driven by the `sources` sheet) plus the `+ Nouvelle source...` sentinel. The menu is parented on `self.tree.winfo_toplevel()` (NOT the tooltip Toplevel) so it survives the tooltip's hide cycle. Picking a value:
+- **A regular source** → updates `self.symbol_info[token]['source']` synchronously, spawns a daemon thread to `_persist_token_source` → rebuilds a single-row dict from cached `symbol_info` (preserves Company Name, Yahoo Finance URL, Source URL, **Watchlist URL, Watchlist Name**) → `_merge_into_symbols_sheet([row])` updates in place. Status bar: `Source mise à jour : <token> → <new>`. Failed write raises a messagebox.
+- **`Investing.com - {NOM DE LA LISTE}`** → simpledialog prompt for list name (pre-filled if existing source already matches), then same persist flow with the composed `Investing.com - <name>` source. **After a successful merge, `_register_new_source(source)` is scheduled on the main thread** so the composite shows directly in future dropdowns.
+- **`+ Nouvelle source...`** → simpledialog for new source name → `register_new_source` callback (wired to `TradingApp._register_new_source`) appends to the `sources` sheet → use as the new source for that token. Cancel / empty input is a silent no-op.
 
 The legacy source value (e.g. `TradingView`) is automatically prepended to the menu if it isn't in `available_sources`, so you can read its current value before swapping it out.
+
+### Add Tokens combobox: "+ Nouvelle source..."
+
+The Add Tokens tab combobox is built with `values = available_sources + [NEW_SOURCE_SENTINEL]`. Picking the sentinel triggers `_on_source_changed` → simpledialog → `_register_new_source(name)` → `source_var` set to the new value. Cancel reverts to `available_sources[0]`. The `Investing.com - {NOM DE LA LISTE}` template still triggers the list-name field visibility toggle.
+
+The sentinel is **never** stored in `self.available_sources` and is **filtered defensively** out of any sheet read by `_refresh_available_sources`, so the on-disk schema stays clean even if someone hand-edits the xlsx.
 
 ### Threading model
 
@@ -337,7 +360,7 @@ If input already looks like a ticker (all-caps, ≤15 chars), it is passed throu
 
 ### Testing
 
-10. **Signal logic still untested**: The Add Tokens flow now has a 18-test pytest suite (`tests/test_add_tokens_tab.py`), and `symbols_finder.py` has its own 18-test suite. But the indicator computations and signal classification in `trading_signal_generator.py` remain untested. Any refactor of signal logic still risks silent breakage.
+10. **Signal logic still untested**: The Add Tokens flow now has a 44-test pytest suite (`tests/test_add_tokens_tab.py` — covers Watchlist columns, sentinel flow, Investing auto-persist), and `symbols_finder.py` has its own 34-test suite. But the indicator computations and signal classification in `trading_signal_generator.py` remain untested. Any refactor of signal logic still risks silent breakage.
 
 ### Windows-specific
 
@@ -424,6 +447,8 @@ python symbols_finder.py names.xlsx -o names_with_symbols.xlsx
 - [ ] **Colonne "Company Name"** : afficher le nom complet de l'entreprise à côté du symbole dans toutes les vues (surtout utile pour les symboles exotiques). Nécessite de stocker le mapping symbol→name (probablement via `yf.Ticker(token).info['longName']` ou depuis le fichier `names_with_symbols.xlsx`).
 - [ ] **Nouveaux filtres** : 1-2 critères de filtre supplémentaires dans la barre de la GUI (à préciser — candidates : filtre par CCI, filtre par signal spécifique Buy+/Sell+, filtre cross uniquement).
 - [x] **Onglet Add Tokens** *(branche `add_tokens_tab`, mai 2026)*: 5ème onglet de la GUI permettant d'ajouter des symboles (ou des noms d'entreprise) à la feuille `symbols` du xlsx en collant une liste, en choisissant une source dans une liste finie, et optionnellement une URL. Tooltip enrichi avec une ligne "Source URL". Voir section "Add Tokens Flow" plus haut.
+- [x] **Watchlist URL + Name** *(branche `add_tokens_tab`, mai 2026)*: deuxième paire de champs optionnels dans Add Tokens (URL + nom de la watchlist), deux nouvelles colonnes dans la feuille `symbols`, ligne tooltip adaptative `Watchlist:  <URL> - <nom>`.
+- [x] **Auto-persist sources** *(branche `add_tokens_tab`, mai 2026)*: option `+ Nouvelle source...` en fin de dropdown (Add Tokens + tooltip menu) pour créer une nouvelle source à la volée ; chaque `Investing.com - <liste>` est aussi auto-ajouté à la feuille `sources` après usage.
 
 ### Moyen terme — Features futures (non spécifiées)
 - [ ] À définir selon les besoins qui émergent
