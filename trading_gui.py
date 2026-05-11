@@ -54,6 +54,9 @@ DEFAULT_SOURCES = [
 ]
 INVESTING_LIST_TEMPLATE = "Investing.com - {NOM DE LA LISTE}"
 INVESTING_PREFIX = "Investing.com"
+# Sentinel appended to source dropdowns (Add Tokens + tooltip). Picking it
+# prompts for a new source name which is persisted to the `sources` sheet.
+NEW_SOURCE_SENTINEL = "+ Nouvelle source..."
 
 DATA_LOCK = threading.Lock()
 
@@ -231,11 +234,13 @@ class TokenTooltip:
     """
 
     def __init__(self, tree: ttk.Treeview, symbol_info: dict,
-                 on_source_change=None, get_sources=None):
+                 on_source_change=None, get_sources=None,
+                 register_new_source=None):
         self.tree = tree
         self.symbol_info = symbol_info
         self.on_source_change = on_source_change
         self.get_sources = get_sources
+        self.register_new_source = register_new_source
         self.tooltip_window = None
         self.last_item = None
         self._hide_id = None
@@ -411,6 +416,10 @@ class TokenTooltip:
         menu_sources = list(sources)
         if current and current not in menu_sources:
             menu_sources.insert(0, current)
+        # Append the "+ Nouvelle source..." sentinel if a registration callback
+        # is wired. Picked → prompt for new name → persist → use as new source.
+        if self.register_new_source:
+            menu_sources.append(NEW_SOURCE_SENTINEL)
 
         menu = tk.Menu(self.tree.winfo_toplevel(), tearoff=0)
         self._source_menu_var = tk.StringVar(value=current)
@@ -427,16 +436,31 @@ class TokenTooltip:
             menu.grab_release()
 
     def _on_source_picked(self, token, new_source):
-        """Forward the user's pick to the app, prompting for a list name when
-        the Investing.com template is chosen."""
+        """Forward the user's pick to the app, prompting for a name when the
+        '+ Nouvelle source...' sentinel or the Investing.com template is chosen."""
         if not self.on_source_change:
             return
         old = (self.symbol_info.get(token, {}) or {}).get("source", "")
 
+        # "+ Nouvelle source..." → ask for a name, register, then use it
+        if new_source == NEW_SOURCE_SENTINEL:
+            if not self.register_new_source:
+                return
+            name = simpledialog.askstring(
+                "Nouvelle source",
+                "Nom de la nouvelle source :",
+                parent=self.tree.winfo_toplevel(),
+            )
+            if not name or not name.strip():
+                return  # cancelled
+            name = name.strip()
+            self.register_new_source(name)
+            new_source = name
+
         # Investing.com - {NOM DE LA LISTE} → ask the user for the actual name.
         # Pre-fill with the current list name if the existing source already
         # matches the 'Investing.com - <name>' shape, so editing is a one-liner.
-        if new_source == INVESTING_LIST_TEMPLATE:
+        elif new_source == INVESTING_LIST_TEMPLATE:
             prefix = f"{INVESTING_PREFIX} - "
             initial = old[len(prefix):] if old.startswith(prefix) else ""
             list_name = simpledialog.askstring(
@@ -749,6 +773,7 @@ class TradingApp:
                 self.symbol_info,
                 on_source_change=self._update_token_source,
                 get_sources=lambda: self.available_sources,
+                register_new_source=self._register_new_source,
             )
 
         # Build Add Tokens tab (after timeframe tabs)
@@ -820,7 +845,7 @@ class TradingApp:
         initial = self.available_sources[0] if self.available_sources else ""
         self.source_var = tk.StringVar(value=initial)
         self.source_combobox = ttk.Combobox(src_row, textvariable=self.source_var,
-                                            values=self.available_sources,
+                                            values=list(self.available_sources) + [NEW_SOURCE_SENTINEL],
                                             state="readonly", width=40)
         self.source_combobox.pack(side=tk.LEFT, padx=4)
         self.source_combobox.bind("<<ComboboxSelected>>", self._on_source_changed)
@@ -876,8 +901,28 @@ class TradingApp:
         self.add_log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
 
     def _on_source_changed(self, event=None):
-        """Toggle the optional list-name field for the Investing.com template."""
-        if self.source_var.get() == INVESTING_LIST_TEMPLATE:
+        """Toggle the optional list-name field for the Investing.com template;
+        intercept the '+ Nouvelle source...' sentinel to prompt for a new name."""
+        selected = self.source_var.get()
+
+        if selected == NEW_SOURCE_SENTINEL:
+            new_name = simpledialog.askstring(
+                "Nouvelle source",
+                "Nom de la nouvelle source :",
+                parent=self.root,
+            )
+            if new_name and new_name.strip():
+                new_name = new_name.strip()
+                self._register_new_source(new_name)
+                self.source_var.set(new_name)
+                selected = new_name
+            else:
+                # Cancel or empty → revert to first known source
+                fallback = self.available_sources[0] if self.available_sources else ""
+                self.source_var.set(fallback)
+                selected = fallback
+
+        if selected == INVESTING_LIST_TEMPLATE:
             self.list_name_frame.pack(fill=tk.X, pady=(8, 0))
         else:
             self.list_name_frame.pack_forget()
@@ -983,6 +1028,11 @@ class TradingApp:
             except Exception as e:
                 persist_error = e
 
+        # Mod 2b: if the used source is an Investing.com composite, persist it
+        # to the sources sheet so it appears directly in future dropdowns.
+        if (added or updated) and source.startswith(f"{INVESTING_PREFIX} - "):
+            self.root.after(0, self._register_new_source, source)
+
         self.root.after(0, self._on_add_complete, added, updated, failures, persist_error)
 
     def _merge_into_symbols_sheet(self, new_rows):
@@ -1081,6 +1131,10 @@ class TradingApp:
         }
         try:
             self._merge_into_symbols_sheet([row])
+            # Mod 2b: persist Investing.com composites so they show up directly
+            # in future dropdowns (combobox + tooltip menu).
+            if new_source.startswith(f"{INVESTING_PREFIX} - "):
+                self.root.after(0, self._register_new_source, new_source)
         except Exception as e:
             self.root.after(
                 0,
@@ -1389,10 +1443,28 @@ class TradingApp:
                 except Exception as e:
                     print(f"[sources] could not initialize sources sheet: {e}")
 
+        # Defensive: drop any accidental sentinel writes
+        sources = [s for s in sources if s != NEW_SOURCE_SENTINEL]
         self.available_sources = sources
         cb = getattr(self, 'source_combobox', None)
         if cb is not None:
-            cb['values'] = sources
+            cb['values'] = list(sources) + [NEW_SOURCE_SENTINEL]
+
+    def _register_new_source(self, name):
+        """Append `name` to the sources sheet if not already present, refresh
+        self.available_sources and the Add Tokens combobox values. Idempotent:
+        no-op if name is empty, the sentinel, or already known."""
+        name = (name or "").strip()
+        if not name or name == NEW_SOURCE_SENTINEL or name in self.available_sources:
+            return
+        self.available_sources.append(name)
+        try:
+            self._write_sources_sheet(self.available_sources)
+        except Exception as e:
+            print(f"[sources] register write warning: {e}")
+        cb = getattr(self, 'source_combobox', None)
+        if cb is not None:
+            cb['values'] = list(self.available_sources) + [NEW_SOURCE_SENTINEL]
 
     def _write_sources_sheet(self, sources):
         """Persist a `sources` sheet to xlsx, preserving every other sheet verbatim.
