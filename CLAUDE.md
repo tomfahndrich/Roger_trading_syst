@@ -69,7 +69,7 @@ trading_synthesis.xlsx (save via temp file + shutil.move for atomicity)
 | `trading_signal_generator.py` | Fetch, compute, classify, persist signals |
 | `trading_gui.py` | Display, filter, edit, save; hosts the Add Tokens tab |
 | `roger_trading_launcher.py` | Entry-point routing only |
-| `Roger_trading_yfinance_symbol/symbols_finder.py` | Symbol discovery — used as a CLI **and** imported by `trading_gui.py` (`best_symbol_for_company`, `lookup_info_for_symbol`) for the Add Tokens flow |
+| `Roger_trading_yfinance_symbol/symbols_finder.py` | Symbol discovery — used as a CLI **and** imported by `trading_gui.py` (`resolve_and_lookup`, `best_symbol_for_company`, `to_yf_symbol`) for the Add Tokens flow. The new `resolve_and_lookup` is the canonical entry point in symbol mode: it chains EXCHANGE-prefix mapping + direct `Ticker.info` + `yf.Search` fallback in one call. |
 | `Roger_trading_yfinance_symbol/extract_symbols_from_txt.py` | Standalone CLI for TradingView watchlist parsing |
 
 ---
@@ -257,7 +257,7 @@ Single-column sheet (`Source Name`) driving the Add Tokens dropdown and the tool
 
 1. **`_merge_into_symbols_sheet` mutates ONLY the symbols sheet.** Every other sheet (timeframes, sources, anything else) is read in, then written back verbatim.
 2. **No row is ever deleted from the symbols sheet** — duplicates are updated in place.
-3. **`Symbols` column casing is preserved on update** (constant `UPDATABLE_SYMBOL_COLS` excludes it). The 4 metadata columns are always overwritten.
+3. **`Symbols` column casing is preserved on update** (constant `UPDATABLE_SYMBOL_COLS` excludes it). The 6 metadata columns (Company Name, Yahoo Finance URL, Source, Source URL, Watchlist URL, Watchlist Name) are always overwritten on duplicate match — the row identity is the `Symbols` value itself.
 4. **All writes go through temp file + `shutil.move`** for atomicity (same pattern as `save_data_to_excel`).
 5. **`DATA_LOCK` is held** during the read-modify-write cycle.
 
@@ -296,7 +296,8 @@ The sentinel is **never** stored in `self.available_sources` and is **filtered d
 ### Threading model
 
 - `_on_add_tokens` validates, disables the Add button, then `threading.Thread(daemon=True).start()` on `_add_tokens_worker`
-- `_add_tokens_worker` runs `lookup_info_for_symbol` / `best_symbol_for_company` per token with a 0.25s sleep (yfinance rate limit)
+- `_add_tokens_worker` runs `resolve_and_lookup(raw)` (symbol mode) or `best_symbol_for_company(raw)` (name mode) per token with a 0.25s sleep (yfinance rate limit)
+- The actual Yahoo ticker returned by `resolve_and_lookup` is stored in the `Symbols` column — may differ from the raw input when the search fallback finds a better match (e.g. `FOOXCHG:USIM5` → search → `USIM5.SA`)
 - All UI updates from the worker go through `self.root.after(0, ...)` — never call Tk from the worker thread directly
 - On completion: `_on_add_complete` re-enables the button, calls `_reload_symbol_info` to refresh tooltip metadata (does NOT touch Treeviews — preserves filter state), shows messagebox summary
 - Failures (unknown ticker, ambiguous name) are collected and reported but never block the rest of the batch
@@ -305,9 +306,9 @@ The sentinel is **never** stored in `self.available_sources` and is **filtered d
 
 ## Symbol Tools (Roger_trading_yfinance_symbol/)
 
-These are **standalone CLI utilities** — they are not imported by the main app.
+`symbols_finder.py` is **dual-purpose**: a CLI for batch xlsx processing AND a library imported by `trading_gui.py` for the Add Tokens flow. `extract_symbols_from_txt.py` remains a standalone CLI.
 
-### `extract_symbols_from_txt.py`
+### `extract_symbols_from_txt.py` (CLI only)
 
 Parses TradingView watchlist export format: `EXCHANGE:SYMBOL,EXCHANGE:SYMBOL,...` (with `###CATEGORY` headers).
 
@@ -317,18 +318,58 @@ python extract_symbols_from_txt.py symbols_to_extract.txt -o symbols.xlsx
 
 Outputs a single-column Excel with `Symbol` header.
 
-### `symbols_finder.py`
+### `symbols_finder.py` — public API (imported by the GUI)
 
-Maps company names to Yahoo Finance tickers using `yfinance.Search` with a scoring heuristic:
-- Prefers EQUITY > ETF > MUTUALFUND > INDEX > CRYPTO
-- Bonus for name substring match and token overlap
-- Penalty for missing symbol, preference for shorter symbols
+| Function | Purpose |
+|---|---|
+| `to_yf_symbol(raw)` | Pure mapper: `'BOVESPA:USIM5'` → `'USIM5.SA'`. Uses `EXCHANGE_TO_YF_SUFFIX` (~60 exchanges). Idempotent on bare tickers. Unknown prefix → bare symbol fallback. |
+| `parse_exchange_token(raw)` | `'XTRA:MUV2'` → `('XTRA', 'MUV2')`; bare input → `(None, input)`. |
+| `lookup_info_for_symbol(symbol)` | `yf.Ticker(to_yf_symbol(symbol)).info` → `(company_name, debug)`. Pure direct lookup, no fallback. |
+| `best_symbol_for_company(company)` | Name mode: `yf.Search(company)` → `(symbol, name, debug)` via `score_quote` heuristic (EQUITY > ETF > ... + name overlap). |
+| **`resolve_and_lookup(raw)`** | **Canonical entry point for symbol mode.** Chains `to_yf_symbol` + `Ticker.info` + `yf.Search` fallback. Returns `(yf_symbol, company_name, debug)` — `yf_symbol` may differ from `to_yf_symbol(raw)` when the search finds a better match. |
+| `_search_yahoo_for_symbol(bare)` | Internal: `yf.Search(bare)` → best candidate by `_score_symbol_match`. EQUITY +5 tiebreak. |
+| `_score_symbol_match(target, candidate)` | Pure ranking: exact=100, `target+'.'+suffix`=90, `candidate+'.'+target`=60, contains=30, else=0. |
 
-```bash
-python symbols_finder.py names.xlsx -o names_with_symbols.xlsx
+### `EXCHANGE_TO_YF_SUFFIX` map (60+ entries)
+
+Aggregated coverage:
+- **US**: NYSE, NASDAQ, NSDQ, AMEX, BATS, ARCA, OTC, OTCMKTS, CBOE, PINK (all → empty suffix)
+- **Germany**: XTRA, XETR, ETR, FWB, FRA, GETTEX, TRADEGATE (→ `.DE` / `.F`)
+- **UK**: LSE, LON, AIM (→ `.L`)
+- **Canada**: TSX (`.TO`), TSXV (`.V`), CSE (`.CN`), NEO (`.NE`)
+- **Brazil**: BMFBOVESPA, BVMF, B3, **BOVESPA** (→ `.SA`)
+- **Asia**: HKEX/SEHK (`.HK`), TYO/TSE/JPX (`.T`), KRX (`.KS`), TPE/TWSE (`.TW`), SGX (`.SI`), SSE/SHA (`.SS`), SZSE/SHE (`.SZ`), BSE (`.BO`), NSE (`.NS`)
+- **Europe**: EPA/PAR/EURONEXT (`.PA`), AMS (`.AS`), BIT/MIL/MIB (`.MI`), BME/MAD (`.MC`), SIX/SWX/EBS (`.SW`), VIE (`.VI`), WSE/GPW (`.WA`), OMX/STO (`.ST`), CPH (`.CO`), HEL (`.HE`), OSL/OBX (`.OL`), BRU (`.BR`), LIS/ELI (`.LS`)
+- **Latam / Africa / Middle East**: BMV/BIVA (`.MX`), BCBA/BYMA (`.BA`), BCS (`.SN`), **JSE** (`.JO`), **TADAWUL/SAUDI** (`.SR`), **TASE** (`.TA`), **EGX** (`.CA`)
+
+### Search-fallback flow (added for `BOVESPA:USIM5` case)
+
+Triggered automatically inside `resolve_and_lookup` when the direct `Ticker.info` returns empty:
+
+```
+raw input               to_yf_symbol            Ticker.info           fallback path
+─────────────────────   ──────────────────      ─────────────          ──────────────
+'BOVESPA:USIM5'    →    'USIM5.SA'         →   ✓ Usiminas             (no fallback)
+'XTRA:MUV2'        →    'MUV2.DE'          →   ✓ Munich Re            (no fallback)
+'AAPL'             →    'AAPL'             →   ✓ Apple                (no fallback)
+'FOOXCHG:USIM5'    →    'USIM5' (unknown)  →   ✗ no info             yf.Search('USIM5')
+                                                                      → score candidates
+                                                                      → 'USIM5.SA' wins
 ```
 
-If input already looks like a ticker (all-caps, ≤15 chars), it is passed through unchanged.
+This means an unmapped or mistyped exchange prefix is still recoverable as long as Yahoo's search index finds a single-prefix match for the bare ticker.
+
+### CLI usage (unchanged)
+
+```bash
+# name mode (default)
+python symbols_finder.py names.xlsx -o names_with_symbols.xlsx
+
+# symbol mode
+python symbols_finder.py symbols_to_extract.xlsx --mode symbol -o symbols_with_names.xlsx
+```
+
+The CLI still uses `best_symbol_for_company` and `lookup_info_for_symbol` directly (no `resolve_and_lookup` in the CLI path — added scope only benefits the GUI today; can be wired later if needed).
 
 ---
 
@@ -360,7 +401,7 @@ If input already looks like a ticker (all-caps, ≤15 chars), it is passed throu
 
 ### Testing
 
-10. **Signal logic still untested**: The Add Tokens flow now has a 44-test pytest suite (`tests/test_add_tokens_tab.py` — covers Watchlist columns, sentinel flow, Investing auto-persist), and `symbols_finder.py` has its own 34-test suite. But the indicator computations and signal classification in `trading_signal_generator.py` remain untested. Any refactor of signal logic still risks silent breakage.
+10. **Signal logic still untested**: The Add Tokens flow now has a 44-test pytest suite (`tests/test_add_tokens_tab.py` — covers Watchlist columns, sentinel flow, Investing auto-persist), and `symbols_finder.py` has its own 54-test suite (covers two-way lookup, EXCHANGE prefix mapping, search-based fallback, score helper). Total: **98 tests, all green**. But the indicator computations and signal classification in `trading_signal_generator.py` remain untested. Any refactor of signal logic still risks silent breakage.
 
 ### Windows-specific
 
@@ -446,9 +487,11 @@ python symbols_finder.py names.xlsx -o names_with_symbols.xlsx
 ### Court terme — Features actives (prochaines sessions)
 - [ ] **Colonne "Company Name"** : afficher le nom complet de l'entreprise à côté du symbole dans toutes les vues (surtout utile pour les symboles exotiques). Nécessite de stocker le mapping symbol→name (probablement via `yf.Ticker(token).info['longName']` ou depuis le fichier `names_with_symbols.xlsx`).
 - [ ] **Nouveaux filtres** : 1-2 critères de filtre supplémentaires dans la barre de la GUI (à préciser — candidates : filtre par CCI, filtre par signal spécifique Buy+/Sell+, filtre cross uniquement).
-- [x] **Onglet Add Tokens** *(branche `add_tokens_tab`, mai 2026)*: 5ème onglet de la GUI permettant d'ajouter des symboles (ou des noms d'entreprise) à la feuille `symbols` du xlsx en collant une liste, en choisissant une source dans une liste finie, et optionnellement une URL. Tooltip enrichi avec une ligne "Source URL". Voir section "Add Tokens Flow" plus haut.
-- [x] **Watchlist URL + Name** *(branche `add_tokens_tab`, mai 2026)*: deuxième paire de champs optionnels dans Add Tokens (URL + nom de la watchlist), deux nouvelles colonnes dans la feuille `symbols`, ligne tooltip adaptative `Watchlist:  <URL> - <nom>`.
-- [x] **Auto-persist sources** *(branche `add_tokens_tab`, mai 2026)*: option `+ Nouvelle source...` en fin de dropdown (Add Tokens + tooltip menu) pour créer une nouvelle source à la volée ; chaque `Investing.com - <liste>` est aussi auto-ajouté à la feuille `sources` après usage.
+- [x] **Onglet Add Tokens** *(mergé dans master, mai 2026)*: 5ème onglet de la GUI permettant d'ajouter des symboles (ou des noms d'entreprise) à la feuille `symbols` du xlsx en collant une liste, en choisissant une source dans une liste finie, et optionnellement une URL. Tooltip enrichi avec une ligne "Source URL". Voir section "Add Tokens Flow" plus haut.
+- [x] **Watchlist URL + Name** *(mergé dans master, mai 2026)*: deuxième paire de champs optionnels dans Add Tokens (URL + nom de la watchlist), deux nouvelles colonnes dans la feuille `symbols`, ligne tooltip adaptative `Watchlist:  <URL> - <nom>`.
+- [x] **Auto-persist sources** *(mergé dans master, mai 2026)*: option `+ Nouvelle source...` en fin de dropdown (Add Tokens + tooltip menu) pour créer une nouvelle source à la volée ; chaque `Investing.com - <liste>` est aussi auto-ajouté à la feuille `sources` après usage.
+- [x] **Source editable depuis le tooltip** *(mergé dans master, mai 2026)*: la ligne `Source:` du tooltip est cliquable et ouvre un menu radio listant toutes les sources connues + `+ Nouvelle source...`. La sélection met à jour la feuille `symbols` en background sans toucher aux autres colonnes.
+- [x] **EXCHANGE:SYMBOL resolver + search fallback** *(mergé dans master, mai 2026)*: nouvelle fonction `resolve_and_lookup` qui résout les préfixes TradingView (XTRA, BOVESPA, NYSE, JSE, etc. — ~60 exchanges mappés) vers le ticker Yahoo Finance ; fallback `yf.Search` quand le mapping direct échoue (ex : `FOOXCHG:USIM5` → `USIM5.SA` via recherche sur le ticker brut). Le ticker stocké est celui que Yahoo connaît effectivement, donc `trading_signal_generator` peut toujours fetch les bougies.
 
 ### Moyen terme — Features futures (non spécifiées)
 - [ ] À définir selon les besoins qui émergent
