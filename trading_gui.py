@@ -20,6 +20,7 @@ if _HERE not in sys.path:
 from Roger_trading_yfinance_symbol.symbols_finder import (
     best_symbol_for_company,
     lookup_info_for_symbol,
+    resolve_and_lookup,
     to_yf_symbol,
 )
 
@@ -986,11 +987,13 @@ class TradingApp:
             company_name = None
             try:
                 if mode == "symbol":
-                    # Normalise EXCHANGE:SYMBOL (e.g. XTRA:MUV2 → MUV2.DE) so the
-                    # value stored in the symbols sheet is what trading_signal_generator
-                    # can fetch from yfinance downstream.
-                    symbol = to_yf_symbol(raw)
-                    company_name, _dbg = lookup_info_for_symbol(symbol)
+                    # resolve_and_lookup handles EXCHANGE:SYMBOL normalisation
+                    # (e.g. XTRA:MUV2 → MUV2.DE) and falls back to yf.Search on
+                    # the bare ticker when the direct lookup misses (e.g.
+                    # BOVESPA:USIM5 → USIM5 → search finds USIM5.SA). The
+                    # returned `symbol` is the actual Yahoo Finance ticker,
+                    # which is what trading_signal_generator needs downstream.
+                    symbol, company_name, _dbg = resolve_and_lookup(raw)
                 else:
                     symbol, company_name, _dbg = best_symbol_for_company(raw)
             except Exception as e:
