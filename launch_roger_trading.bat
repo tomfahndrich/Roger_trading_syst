@@ -1,19 +1,23 @@
 @echo off
-REM This script updates two specific .py files from the Roger branch and launches the GUI.
+REM Sync the entire repo to origin/Roger2 then launch the GUI.
+REM
+REM Previously this script only checked out trading_gui.py and
+REM trading_signal_generator.py — that broke whenever the GUI started
+REM importing new symbols from Roger_trading_yfinance_symbol/. Now we sync
+REM the whole branch so every tracked file (incl. symbols_finder.py,
+REM __init__.py, this .bat itself, ...) stays in lock-step with origin.
+REM
+REM Gitignored files (trading_synthesis.xlsx, __pycache__, ~$lock files,
+REM etc.) are preserved on disk.
 
-REM Get the directory of this batch file.
 set SCRIPT_DIR=%~dp0
-
-REM Change to the script's directory.
 cd /D "%SCRIPT_DIR%"
 
-REM Update the remote tracking information
+REM Pull latest from the remote and snap local Roger2 to it.
 git fetch origin Roger2
+git checkout -B Roger2 origin/Roger2
 
-REM Checkout only specific files from the Roger branch
-git checkout origin/Roger2 -- trading_gui.py trading_signal_generator.py
-
-echo Updated trading_gui.py and signal_generator.py from branch Roger.
+echo Repo synced to origin/Roger2.
 
 echo Attempting to launch Roger Trading System GUI...
 echo Please ensure Python 3 is installed and all required packages (pandas, yfinance, ta, openpyxl, etc.) are available.
