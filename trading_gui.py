@@ -1,13 +1,28 @@
 import os
+import sys
+import time
 import webbrowser
 import numpy as np
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, messagebox, filedialog, simpledialog
 import pandas as pd
 from trading_signal_generator import main as generate_signals, TIMEFRAMES, EXCEL_FILE, TRADE_COLS
 import threading
 import tempfile
 import shutil
+
+# Make the symbols_finder helpers importable regardless of cwd. trading_gui.py
+# may be launched directly from any directory; we anchor the package path on
+# this file's location.
+_HERE = os.path.dirname(os.path.abspath(__file__))
+if _HERE not in sys.path:
+    sys.path.insert(0, _HERE)
+from Roger_trading_yfinance_symbol.symbols_finder import (
+    best_symbol_for_company,
+    lookup_info_for_symbol,
+    resolve_and_lookup,
+    to_yf_symbol,
+)
 
 # BASE_COLS from trading_signal_generator.py: ['datetime', 'signal', 'token', 'close price', 'CCI', 'stoch K', 'stoch D', 'slope K', 'slope D', 'ADX']
 BASE_COLS_GUI = ['datetime', 'signal', 'token', 'close price', 'CCI', 'stoch K', 'stoch D', 'slope K', 'slope D', 'ADX']
@@ -17,7 +32,131 @@ NOTES_COL_GUI = 'notes'
 TRADE_COLS_GUI = TRADE_COLS  # Reuse ordering from generator
 ALL_NEW_ORDER_APPEND = TRADE_COLS_GUI
 
+# Symbols sheet schema (constants — single source of truth)
+SYMBOLS_SHEET = 'symbols'
+SOURCES_SHEET = 'sources'
+SYMBOLS_COLS = ['Symbols', 'Company Name', 'Yahoo Finance URL', 'Source', 'Source URL',
+                'Watchlist URL', 'Watchlist Name']
+# Columns updated on duplicate match. 'Symbols' is the row's identity and its
+# original casing is preserved across updates.
+UPDATABLE_SYMBOL_COLS = ['Company Name', 'Yahoo Finance URL', 'Source', 'Source URL',
+                         'Watchlist URL', 'Watchlist Name']
+
+# Default source list for the Add Tokens dropdown. Written to the `sources` sheet
+# on first launch if absent; thereafter the xlsx is the source of truth so the
+# user can edit sources without touching code.
+DEFAULT_SOURCES = [
+    "Buffet videos",
+    "Diallo videos",
+    "Raoul Pal",
+    "Quentin Chapeau",
+    "Investing.com Actu",
+    "Investing.com - {NOM DE LA LISTE}",
+]
+INVESTING_LIST_TEMPLATE = "Investing.com - {NOM DE LA LISTE}"
+INVESTING_PREFIX = "Investing.com"
+# Sentinel appended to source dropdowns (Add Tokens + tooltip). Picking it
+# prompts for a new source name which is persisted to the `sources` sheet.
+NEW_SOURCE_SENTINEL = "+ Nouvelle source..."
+
 DATA_LOCK = threading.Lock()
+
+
+def _safe_str(val):
+    """Return '' for None / NaN / the literal string 'nan' (a common artefact
+    of pandas reading missing cells), otherwise str(val).strip()."""
+    if val is None:
+        return ""
+    try:
+        if pd.isna(val):
+            return ""
+    except (TypeError, ValueError):
+        pass
+    s = str(val).strip()
+    return "" if s.lower() == "nan" else s
+
+
+def parse_tokens(text):
+    """Parse a multi-line text into a deduplicated, stripped list of non-empty tokens.
+    Deduplication is case-insensitive; the first occurrence's casing is preserved."""
+    seen = set()
+    result = []
+    for line in (text or "").splitlines():
+        token = line.strip()
+        if not token:
+            continue
+        key = token.upper()
+        if key in seen:
+            continue
+        seen.add(key)
+        result.append(token)
+    return result
+
+
+def build_source(template, list_name):
+    """Resolve the final Source string written to the symbols sheet.
+    Special case: the Investing.com template gets concatenated with list_name,
+    or strips the suffix entirely when list_name is empty."""
+    template = (template or "").strip()
+    list_name = (list_name or "").strip()
+    if template == INVESTING_LIST_TEMPLATE:
+        return f"{INVESTING_PREFIX} - {list_name}" if list_name else INVESTING_PREFIX
+    return template
+
+
+def merge_symbol_rows(existing_df, new_rows):
+    """Merge new_rows into existing_df, returning (merged_df, added, updated).
+
+    - Matches existing rows on Symbols column case-insensitively (strip + upper)
+    - Existing matches: every column in SYMBOLS_COLS is overwritten with the new value
+    - Non-matches: appended at the end
+    - Within-batch duplicates: first appended, later occurrences update the queued row
+    - Rows with empty Symbols are silently skipped
+    """
+    df = existing_df.copy() if existing_df is not None else pd.DataFrame(columns=SYMBOLS_COLS)
+    for col in SYMBOLS_COLS:
+        if col not in df.columns:
+            df[col] = ""
+    df = df.reindex(columns=SYMBOLS_COLS)
+
+    sym_lower = df['Symbols'].astype(str).str.strip().str.upper()
+    by_symbol = {}
+    for idx, sym in sym_lower.items():
+        if sym and sym not in by_symbol:
+            by_symbol[sym] = idx
+
+    added = 0
+    updated = 0
+    appended = []  # ordered list of dict rows pending append
+    appended_keys = {}  # sym_key -> index into appended
+
+    for row in new_rows or []:
+        sym_key = str(row.get('Symbols', '')).strip().upper()
+        if not sym_key:
+            continue
+        if sym_key in by_symbol:
+            idx = by_symbol[sym_key]
+            # Preserve the existing Symbols casing — only metadata cols are overwritten
+            for col in UPDATABLE_SYMBOL_COLS:
+                df.at[idx, col] = row.get(col, df.at[idx, col])
+            updated += 1
+        elif sym_key in appended_keys:
+            # Same rule for within-batch duplicates: first occurrence sets the casing
+            entry = appended[appended_keys[sym_key]]
+            for col in UPDATABLE_SYMBOL_COLS:
+                entry[col] = row.get(col, entry[col])
+        else:
+            appended.append({col: row.get(col, '') for col in SYMBOLS_COLS})
+            appended_keys[sym_key] = len(appended) - 1
+            added += 1
+
+    if appended:
+        df = pd.concat(
+            [df, pd.DataFrame(appended, columns=SYMBOLS_COLS)],
+            ignore_index=True,
+        )
+    return df, added, updated
+
 
 def format_decimal(val):
     if val is None or val == "" or (isinstance(val, float) and pd.isna(val)):
@@ -87,14 +226,27 @@ class ToolTip:
 
 
 class TokenTooltip:
-    """Tooltip enrichi affiché au survol de la colonne 'token' d'un Treeview."""
+    """Tooltip enrichi affiché au survol de la colonne 'token' d'un Treeview.
 
-    def __init__(self, tree: ttk.Treeview, symbol_info: dict):
+    on_source_change(token, new_source) is invoked when the user clicks the
+    Source line and picks a value from the dropdown. get_sources() must return
+    the current list of available sources (typically backed by the xlsx).
+    Both callbacks are optional — if omitted, the Source line stays read-only.
+    """
+
+    def __init__(self, tree: ttk.Treeview, symbol_info: dict,
+                 on_source_change=None, get_sources=None,
+                 register_new_source=None):
         self.tree = tree
         self.symbol_info = symbol_info
+        self.on_source_change = on_source_change
+        self.get_sources = get_sources
+        self.register_new_source = register_new_source
         self.tooltip_window = None
         self.last_item = None
         self._hide_id = None
+        self._current_token = None  # token shown in the active tooltip
+        self._source_menu_var = None  # holds StringVar bound to the menu
         tree.bind("<Motion>", self.on_motion)
         tree.bind("<Leave>", self._schedule_hide)
 
@@ -122,6 +274,9 @@ class TokenTooltip:
         self._show(token,
                    info.get("company_name") or "-",
                    info.get("yf_url") or "",
+                   info.get("source_url") or "",
+                   info.get("watchlist_url") or "",
+                   info.get("watchlist_name") or "",
                    info.get("source") or "-",
                    event.x_root + 15, event.y_root + 15)
 
@@ -160,28 +315,168 @@ class TokenTooltip:
             self.tooltip_window.destroy()
             self.tooltip_window = None
 
-    def _show(self, token, company, yf_url, source, x, y):
+    def _show(self, token, company, yf_url, source_url, watchlist_url, watchlist_name, source, x, y):
         if self.tooltip_window:
             self.tooltip_window.destroy()
             self.tooltip_window = None
+        self._current_token = token
         win = tk.Toplevel(self.tree)
         win.wm_overrideredirect(True)
         win.wm_geometry(f"+{x}+{y}")
         win.configure(background="#FFFFDD")
         pad = {"padx": 8, "pady": 2, "anchor": "w", "fg": "black"}
-        tk.Label(win, text=f"Symbol:  {token}",  bg="#FFFFDD", font=("Arial", 10, "bold"), **pad).pack(fill="x")
-        tk.Label(win, text=f"Company: {company}", bg="#FFFFDD", font=("Arial", 10), **pad).pack(fill="x")
+        tk.Label(win, text=f"Symbol:     {token}",  bg="#FFFFDD", font=("Arial", 10, "bold"), **pad).pack(fill="x")
+        tk.Label(win, text=f"Company:    {company}", bg="#FFFFDD", font=("Arial", 10), **pad).pack(fill="x")
         if yf_url:
-            lnk = tk.Label(win, text=f"URL:     {yf_url}", bg="#FFFFDD",
+            lnk = tk.Label(win, text=f"URL:        {yf_url}", bg="#FFFFDD",
                            font=("Arial", 10), fg="blue", cursor="hand2", padx=8, pady=2, anchor="w")
             lnk.pack(fill="x")
             lnk.bind("<Button-1>", lambda e, u=yf_url: webbrowser.open(u))
         else:
-            tk.Label(win, text="URL:     -", bg="#FFFFDD", font=("Arial", 10), **pad).pack(fill="x")
-        tk.Label(win, text=f"Source:  {source}", bg="#FFFFDD", font=("Arial", 10),
-                 fg="black", padx=8, pady=2, anchor="w").pack(fill="x", pady=(0, 4))
+            tk.Label(win, text="URL:        -", bg="#FFFFDD", font=("Arial", 10), **pad).pack(fill="x")
+        if source_url:
+            src_lnk = tk.Label(win, text=f"Source URL: {source_url}", bg="#FFFFDD",
+                               font=("Arial", 10), fg="blue", cursor="hand2", padx=8, pady=2, anchor="w")
+            src_lnk.pack(fill="x")
+            src_lnk.bind("<Button-1>", lambda e, u=source_url: webbrowser.open(u))
+        else:
+            tk.Label(win, text="Source URL: -", bg="#FFFFDD", font=("Arial", 10), **pad).pack(fill="x")
+
+        # Watchlist line — adaptive: URL only / Name only / URL - Name / dash
+        self._render_watchlist_line(win, watchlist_url, watchlist_name, pad)
+
+        # Source line — clickable if callbacks are wired (opens a popup menu)
+        editable = self.on_source_change is not None and self.get_sources is not None
+        src_label = tk.Label(
+            win,
+            text=f"Source:     {source}  ▾" if editable else f"Source:     {source}",
+            bg="#FFFFDD", font=("Arial", 10),
+            fg="black", cursor="hand2" if editable else "",
+            padx=8, pady=2, anchor="w",
+        )
+        src_label.pack(fill="x", pady=(0, 4))
+        if editable:
+            src_label.bind("<Button-1>", self._open_source_menu)
+
         win.update_idletasks()
         self.tooltip_window = win
+
+    def _render_watchlist_line(self, win, url, name, pad):
+        """Adaptive Watchlist line:
+            both filled  → 'Watchlist:  <URL clickable> - <name>'
+            URL only     → 'Watchlist:  <URL clickable>'
+            Name only    → 'Watchlist:  <name>'
+            both empty   → 'Watchlist:  -'
+        """
+        if not url and not name:
+            tk.Label(win, text="Watchlist:  -", bg="#FFFFDD", font=("Arial", 10), **pad).pack(fill="x")
+            return
+        if url and not name:
+            lbl = tk.Label(win, text=f"Watchlist:  {url}", bg="#FFFFDD",
+                           font=("Arial", 10), fg="blue", cursor="hand2",
+                           padx=8, pady=2, anchor="w")
+            lbl.pack(fill="x")
+            lbl.bind("<Button-1>", lambda e, u=url: webbrowser.open(u))
+            return
+        if name and not url:
+            tk.Label(win, text=f"Watchlist:  {name}", bg="#FFFFDD",
+                     font=("Arial", 10), **pad).pack(fill="x")
+            return
+        # Both filled: URL clickable, name plain text after a dash
+        row = tk.Frame(win, bg="#FFFFDD")
+        row.pack(fill="x")
+        url_lbl = tk.Label(row, text=f"Watchlist:  {url}", bg="#FFFFDD",
+                           font=("Arial", 10), fg="blue", cursor="hand2",
+                           padx=8, pady=2, anchor="w")
+        url_lbl.pack(side=tk.LEFT)
+        url_lbl.bind("<Button-1>", lambda e, u=url: webbrowser.open(u))
+        tk.Label(row, text=f" - {name}", bg="#FFFFDD", font=("Arial", 10),
+                 fg="black", padx=0, pady=2, anchor="w").pack(side=tk.LEFT)
+
+    def _open_source_menu(self, event):
+        """Pop a radio-button menu under the Source line, current value pre-selected.
+
+        The menu is parented on the tree's toplevel — NOT on self.tooltip_window —
+        so it survives the tooltip's hide cycle. Without this, moving the mouse
+        from the tooltip to the menu would trigger _schedule_hide → _do_hide →
+        tooltip Toplevel destruction → child Menu destruction (Tk parent rule),
+        making lower menu items unreachable.
+        """
+        if not self.on_source_change or not self.get_sources:
+            return
+        sources = list(self.get_sources() or [])
+        if not sources:
+            return
+        token = self._current_token
+        if not token:
+            return
+
+        current = (self.symbol_info.get(token, {}) or {}).get("source", "") or ""
+        # Ensure the current source appears in the menu even if it's not in the
+        # canonical list anymore (legacy sources like 'TradingView')
+        menu_sources = list(sources)
+        if current and current not in menu_sources:
+            menu_sources.insert(0, current)
+        # Append the "+ Nouvelle source..." sentinel if a registration callback
+        # is wired. Picked → prompt for new name → persist → use as new source.
+        if self.register_new_source:
+            menu_sources.append(NEW_SOURCE_SENTINEL)
+
+        menu = tk.Menu(self.tree.winfo_toplevel(), tearoff=0)
+        self._source_menu_var = tk.StringVar(value=current)
+        for src in menu_sources:
+            menu.add_radiobutton(
+                label=src,
+                value=src,
+                variable=self._source_menu_var,
+                command=lambda s=src, t=token: self._on_source_picked(t, s),
+            )
+        try:
+            menu.tk_popup(event.x_root, event.y_root)
+        finally:
+            menu.grab_release()
+
+    def _on_source_picked(self, token, new_source):
+        """Forward the user's pick to the app, prompting for a name when the
+        '+ Nouvelle source...' sentinel or the Investing.com template is chosen."""
+        if not self.on_source_change:
+            return
+        old = (self.symbol_info.get(token, {}) or {}).get("source", "")
+
+        # "+ Nouvelle source..." → ask for a name, register, then use it
+        if new_source == NEW_SOURCE_SENTINEL:
+            if not self.register_new_source:
+                return
+            name = simpledialog.askstring(
+                "Nouvelle source",
+                "Nom de la nouvelle source :",
+                parent=self.tree.winfo_toplevel(),
+            )
+            if not name or not name.strip():
+                return  # cancelled
+            name = name.strip()
+            self.register_new_source(name)
+            new_source = name
+
+        # Investing.com - {NOM DE LA LISTE} → ask the user for the actual name.
+        # Pre-fill with the current list name if the existing source already
+        # matches the 'Investing.com - <name>' shape, so editing is a one-liner.
+        elif new_source == INVESTING_LIST_TEMPLATE:
+            prefix = f"{INVESTING_PREFIX} - "
+            initial = old[len(prefix):] if old.startswith(prefix) else ""
+            list_name = simpledialog.askstring(
+                "Nom de la liste",
+                "Nom de la liste Investing.com\n(vide → 'Investing.com' tout court)",
+                initialvalue=initial,
+                parent=self.tree.winfo_toplevel(),
+            )
+            if list_name is None:
+                return  # cancelled — keep current source
+            new_source = build_source(INVESTING_LIST_TEMPLATE, list_name)
+
+        if new_source == old:
+            return
+        self.on_source_change(token, new_source)
 
     def hide(self, event=None):
         self._schedule_hide(event)
@@ -236,8 +531,12 @@ class TradingApp:
                     df[tc] = ""
             self.data[sheet] = df
             
-        # symbol_info: {token: {company_name, yf_url, source}} — populated in load_data()
+        # symbol_info: {token: {company_name, yf_url, source, source_url}} — populated in load_data()
         self.symbol_info = {}
+
+        # Source list driving the Add Tokens dropdown — refreshed from xlsx in load_data().
+        # Initialized to defaults so create_widgets() can build the combobox before xlsx is read.
+        self.available_sources = list(DEFAULT_SOURCES)
 
         # Create menu
         self.create_menu()
@@ -470,13 +769,405 @@ class TradingApp:
             tree.tag_configure('cross', background='#FFD580')  # Light orange for CROSS
             # Enable editing the notes column
             tree.bind("<Double-1>", self.on_double_click)
-            TokenTooltip(tree, self.symbol_info)
+            TokenTooltip(
+                tree,
+                self.symbol_info,
+                on_source_change=self._update_token_source,
+                get_sources=lambda: self.available_sources,
+                register_new_source=self._register_new_source,
+            )
+
+        # Build Add Tokens tab (after timeframe tabs)
+        self._build_add_tokens_tab()
 
         # Add status bar
         self.status_var = tk.StringVar()
         status_bar = tk.Label(self.root, textvariable=self.status_var, bd=1, relief=tk.SUNKEN, anchor=tk.W, pady=3)
         status_bar.pack(side=tk.BOTTOM, fill=tk.X)
         self.status_var.set("Ready")
+
+    def _build_add_tokens_tab(self):
+        """Build the Add Tokens tab inside self.notebook (always last after timeframes).
+        UI only — handlers are stubbed and wired in Phase 4."""
+        frame = tk.Frame(self.notebook)
+        self.notebook.add(frame, text="Add Tokens")
+        self.tabs['add_tokens'] = frame
+
+        container = tk.Frame(frame, padx=20, pady=15)
+        container.pack(fill=tk.BOTH, expand=True)
+
+        # --- URL field (optional)
+        url_frame = tk.LabelFrame(container, text=" URL (optionnel) - ProPicks AI, Youtube, Article ",
+                                  font=("Arial", 10, "bold"), padx=10, pady=8)
+        url_frame.pack(fill=tk.X, pady=(0, 8))
+        self.url_var = tk.StringVar()
+        url_entry = tk.Entry(url_frame, textvariable=self.url_var, width=80)
+        url_entry.pack(fill=tk.X)
+        ToolTip(url_entry, "URL de la page d'origine — apparaît dans le tooltip des tokens. Vide = trait dans le tooltip.")
+
+        # --- Watchlist URL + Name (both optional)
+        wl_frame = tk.LabelFrame(container, text=" Watchlist (optionnel) ",
+                                 font=("Arial", 10, "bold"), padx=10, pady=8)
+        wl_frame.pack(fill=tk.X, pady=(0, 8))
+        wl_url_row = tk.Frame(wl_frame)
+        wl_url_row.pack(fill=tk.X, pady=(0, 4))
+        tk.Label(wl_url_row, text="URL :", width=6, anchor="w").pack(side=tk.LEFT)
+        self.watchlist_url_var = tk.StringVar()
+        wl_url_entry = tk.Entry(wl_url_row, textvariable=self.watchlist_url_var)
+        wl_url_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ToolTip(wl_url_entry, "URL de la watchlist (Investing.com, TradingView, etc.). Cliquable dans le tooltip des tokens.")
+
+        wl_name_row = tk.Frame(wl_frame)
+        wl_name_row.pack(fill=tk.X)
+        tk.Label(wl_name_row, text="Nom :", width=6, anchor="w").pack(side=tk.LEFT)
+        self.watchlist_name_var = tk.StringVar()
+        wl_name_entry = tk.Entry(wl_name_row, textvariable=self.watchlist_name_var)
+        wl_name_entry.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        ToolTip(wl_name_entry, "Nom lisible de la watchlist. Affiché dans le tooltip après l'URL : 'URL - Nom'.")
+
+        # --- Mode selector (radio: symbol vs name)
+        mode_frame = tk.LabelFrame(container, text=" Mode d'entrée ",
+                                   font=("Arial", 10, "bold"), padx=10, pady=8)
+        mode_frame.pack(fill=tk.X, pady=(0, 8))
+        self.mode_var = tk.StringVar(value="symbol")
+        tk.Radiobutton(mode_frame, text="Symboles (ex: AAPL, MSFT)",
+                       variable=self.mode_var, value="symbol").pack(side=tk.LEFT, padx=10)
+        tk.Radiobutton(mode_frame, text="Noms d'entreprises (ex: Apple Inc.)",
+                       variable=self.mode_var, value="name").pack(side=tk.LEFT, padx=10)
+
+        # --- Source dropdown (+ conditional list-name entry)
+        source_frame = tk.LabelFrame(container, text=" Source ",
+                                     font=("Arial", 10, "bold"), padx=10, pady=8)
+        source_frame.pack(fill=tk.X, pady=(0, 8))
+
+        src_row = tk.Frame(source_frame)
+        src_row.pack(fill=tk.X)
+        tk.Label(src_row, text="Choisir :").pack(side=tk.LEFT, padx=(0, 6))
+        initial = self.available_sources[0] if self.available_sources else ""
+        self.source_var = tk.StringVar(value=initial)
+        self.source_combobox = ttk.Combobox(src_row, textvariable=self.source_var,
+                                            values=list(self.available_sources) + [NEW_SOURCE_SENTINEL],
+                                            state="readonly", width=40)
+        self.source_combobox.pack(side=tk.LEFT, padx=4)
+        self.source_combobox.bind("<<ComboboxSelected>>", self._on_source_changed)
+
+        # Conditional list-name field — only for the Investing.com template
+        self.list_name_frame = tk.Frame(source_frame)
+        self.list_name_var = tk.StringVar()
+        tk.Label(self.list_name_frame, text="Nom de la liste (optionnel) :").pack(side=tk.LEFT, padx=(0, 6))
+        list_name_entry = tk.Entry(self.list_name_frame, textvariable=self.list_name_var, width=35)
+        list_name_entry.pack(side=tk.LEFT)
+        ToolTip(list_name_entry,
+                "Concaténé à 'Investing.com - '. Vide = stocke 'Investing.com' tout court.")
+        self._on_source_changed()  # set initial visibility
+
+        # --- Tokens text area
+        tokens_frame = tk.LabelFrame(container, text=" Tokens (un par ligne) ",
+                                     font=("Arial", 10, "bold"), padx=10, pady=8)
+        tokens_frame.pack(fill=tk.BOTH, expand=True, pady=(0, 8))
+        tokens_inner = tk.Frame(tokens_frame)
+        tokens_inner.pack(fill=tk.BOTH, expand=True)
+        self.tokens_text = tk.Text(tokens_inner, height=8, font=("Courier", 10), wrap=tk.NONE)
+        tokens_scroll = ttk.Scrollbar(tokens_inner, orient=tk.VERTICAL, command=self.tokens_text.yview)
+        self.tokens_text.configure(yscrollcommand=tokens_scroll.set)
+        tokens_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.tokens_text.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+        # --- Action buttons
+        btn_frame = tk.Frame(container)
+        btn_frame.pack(fill=tk.X, pady=(0, 8))
+        self.add_btn = tk.Button(btn_frame, text="➕ Add Tokens", command=self._on_add_tokens,
+                                 bg="#1565C0", fg="white", font=("Arial", 12, "bold"),
+                                 padx=20, pady=6, cursor="hand2", relief=tk.RAISED)
+        self.add_btn.pack(side=tk.LEFT, padx=(0, 8))
+        ToolTip(self.add_btn,
+                "Lookup chaque token via yfinance puis ajoute / met à jour la feuille symbols. Bloqué pendant le traitement.")
+
+        clear_btn = tk.Button(btn_frame, text="Clear", command=self._on_add_clear,
+                              bg="#DCDAD5", padx=15, pady=6, cursor="hand2")
+        clear_btn.pack(side=tk.LEFT)
+        ToolTip(clear_btn, "Vider la zone de tokens et les logs.")
+
+        # --- Status / Log area (read-only)
+        log_frame = tk.LabelFrame(container, text=" Status / Log ",
+                                  font=("Arial", 10, "bold"), padx=10, pady=8)
+        log_frame.pack(fill=tk.BOTH, expand=True)
+        log_inner = tk.Frame(log_frame)
+        log_inner.pack(fill=tk.BOTH, expand=True)
+        self.add_log = tk.Text(log_inner, height=6, font=("Courier", 9), wrap=tk.WORD,
+                               state=tk.DISABLED, bg="#F5F5F5")
+        log_scroll = ttk.Scrollbar(log_inner, orient=tk.VERTICAL, command=self.add_log.yview)
+        self.add_log.configure(yscrollcommand=log_scroll.set)
+        log_scroll.pack(side=tk.RIGHT, fill=tk.Y)
+        self.add_log.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
+
+    def _on_source_changed(self, event=None):
+        """Toggle the optional list-name field for the Investing.com template;
+        intercept the '+ Nouvelle source...' sentinel to prompt for a new name."""
+        selected = self.source_var.get()
+
+        if selected == NEW_SOURCE_SENTINEL:
+            new_name = simpledialog.askstring(
+                "Nouvelle source",
+                "Nom de la nouvelle source :",
+                parent=self.root,
+            )
+            if new_name and new_name.strip():
+                new_name = new_name.strip()
+                self._register_new_source(new_name)
+                self.source_var.set(new_name)
+                selected = new_name
+            else:
+                # Cancel or empty → revert to first known source
+                fallback = self.available_sources[0] if self.available_sources else ""
+                self.source_var.set(fallback)
+                selected = fallback
+
+        if selected == INVESTING_LIST_TEMPLATE:
+            self.list_name_frame.pack(fill=tk.X, pady=(8, 0))
+        else:
+            self.list_name_frame.pack_forget()
+            self.list_name_var.set("")
+
+    def _on_add_clear(self):
+        """Clear the tokens text area and the log widget."""
+        self.tokens_text.delete("1.0", tk.END)
+        self._log_clear()
+
+    def _log_clear(self):
+        self.add_log.config(state=tk.NORMAL)
+        self.add_log.delete("1.0", tk.END)
+        self.add_log.config(state=tk.DISABLED)
+
+    def _log_append(self, msg):
+        """Append a line to the log widget (must be called on the main thread)."""
+        self.add_log.config(state=tk.NORMAL)
+        self.add_log.insert(tk.END, msg + "\n")
+        self.add_log.see(tk.END)
+        self.add_log.config(state=tk.DISABLED)
+
+    def _on_add_tokens(self):
+        """Validate inputs, then dispatch lookup + persistence to a daemon thread."""
+        raw_text = self.tokens_text.get("1.0", tk.END)
+        tokens = parse_tokens(raw_text)
+        if not tokens:
+            messagebox.showwarning("Add Tokens", "Aucun token à ajouter — la zone est vide.")
+            self.tokens_text.focus_set()
+            return
+
+        mode = self.mode_var.get()
+        source = build_source(self.source_var.get(), self.list_name_var.get())
+        url = self.url_var.get().strip()
+        watchlist_url = self.watchlist_url_var.get().strip()
+        watchlist_name = self.watchlist_name_var.get().strip()
+        if not source:
+            messagebox.showwarning("Add Tokens", "Sélectionne une source dans le menu déroulant.")
+            return
+
+        self.add_btn.config(state=tk.DISABLED)
+        self._log_clear()
+        self._log_append(
+            f"Lookup {len(tokens)} entrée(s) — mode={mode!r}, source={source!r}"
+        )
+
+        threading.Thread(
+            target=self._add_tokens_worker,
+            args=(tokens, mode, source, url, watchlist_url, watchlist_name),
+            daemon=True,
+        ).start()
+
+    def _add_tokens_worker(self, tokens, mode, source, url, watchlist_url="", watchlist_name=""):
+        """Background: resolve each entry via yfinance, then atomically merge into xlsx.
+        UI updates are dispatched back to the main thread via root.after()."""
+        success_rows = []
+        failures = []
+        total = len(tokens)
+        for i, raw in enumerate(tokens, start=1):
+            symbol = None
+            company_name = None
+            try:
+                if mode == "symbol":
+                    # resolve_and_lookup handles EXCHANGE:SYMBOL normalisation
+                    # (e.g. XTRA:MUV2 → MUV2.DE) and falls back to yf.Search on
+                    # the bare ticker when the direct lookup misses (e.g.
+                    # BOVESPA:USIM5 → USIM5 → search finds USIM5.SA). The
+                    # returned `symbol` is the actual Yahoo Finance ticker,
+                    # which is what trading_signal_generator needs downstream.
+                    symbol, company_name, _dbg = resolve_and_lookup(raw)
+                else:
+                    symbol, company_name, _dbg = best_symbol_for_company(raw)
+            except Exception as e:
+                self.root.after(0, self._log_append,
+                                f"[{i}/{total}] {raw!r} → erreur: {type(e).__name__}: {e}")
+                failures.append(raw)
+                time.sleep(0.25)
+                continue
+
+            if symbol and company_name:
+                yf_url = f"https://finance.yahoo.com/quote/{symbol}/"
+                success_rows.append({
+                    "Symbols": symbol,
+                    "Company Name": company_name,
+                    "Yahoo Finance URL": yf_url,
+                    "Source": source,
+                    "Source URL": url,
+                    "Watchlist URL": watchlist_url,
+                    "Watchlist Name": watchlist_name,
+                })
+                self.root.after(0, self._log_append,
+                                f"[{i}/{total}] {raw!r} → {symbol}  ({company_name})")
+            else:
+                failures.append(raw)
+                self.root.after(0, self._log_append,
+                                f"[{i}/{total}] {raw!r} → ÉCHEC (pas de résultat)")
+            time.sleep(0.25)
+
+        added = 0
+        updated = 0
+        persist_error = None
+        if success_rows:
+            try:
+                added, updated = self._merge_into_symbols_sheet(success_rows)
+            except Exception as e:
+                persist_error = e
+
+        # Mod 2b: if the used source is an Investing.com composite, persist it
+        # to the sources sheet so it appears directly in future dropdowns.
+        if (added or updated) and source.startswith(f"{INVESTING_PREFIX} - "):
+            self.root.after(0, self._register_new_source, source)
+
+        self.root.after(0, self._on_add_complete, added, updated, failures, persist_error)
+
+    def _merge_into_symbols_sheet(self, new_rows):
+        """Atomic merge of new_rows into the symbols sheet of EXCEL_FILE.
+        Reads ALL sheets, mutates ONLY the symbols sheet, writes back via temp+move.
+        Every other sheet (timeframes, sources, anything else) is preserved verbatim.
+        Returns (added, updated)."""
+        with DATA_LOCK:
+            existing = {}
+            if os.path.exists(EXCEL_FILE):
+                try:
+                    xl = pd.ExcelFile(EXCEL_FILE)
+                    for sn in xl.sheet_names:
+                        existing[sn] = pd.read_excel(xl, sn)
+                except Exception as e:
+                    print(f"[merge] preserve read warning: {e}")
+
+            symbols_df = existing.get(SYMBOLS_SHEET, pd.DataFrame(columns=SYMBOLS_COLS))
+            merged, added, updated = merge_symbol_rows(symbols_df, new_rows)
+            existing[SYMBOLS_SHEET] = merged
+
+            temp_fd, temp_path = tempfile.mkstemp(suffix='.xlsx', prefix='tmp_addtokens_')
+            os.close(temp_fd)
+            try:
+                with pd.ExcelWriter(temp_path, engine='openpyxl') as writer:
+                    for sn, df in existing.items():
+                        df.to_excel(writer, sheet_name=sn, index=False)
+                shutil.move(temp_path, EXCEL_FILE)
+            finally:
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except OSError:
+                        pass
+            return added, updated
+
+    def _on_add_complete(self, added, updated, failures, persist_error):
+        """Main-thread callback: re-enable UI, refresh tooltip data, show summary."""
+        self.add_btn.config(state=tk.NORMAL)
+
+        if persist_error:
+            msg = f"Erreur lors de l'écriture xlsx: {persist_error}"
+            self._log_append(msg)
+            messagebox.showerror("Add Tokens", msg)
+            return
+
+        try:
+            self._reload_symbol_info()
+        except Exception as e:
+            print(f"[reload symbol_info] {e}")
+
+        summary_lines = [f"{added} ajouté(s), {updated} mis à jour, {len(failures)} échec(s)."]
+        if failures:
+            preview = failures[:20]
+            summary_lines.append("Échecs : " + ", ".join(preview))
+            if len(failures) > 20:
+                summary_lines.append(f"(+ {len(failures) - 20} autres)")
+
+        self._log_append("--- Terminé ---")
+        for line in summary_lines:
+            self._log_append(line)
+
+        if added or updated:
+            self.tokens_text.delete("1.0", tk.END)
+        messagebox.showinfo("Add Tokens", "\n".join(summary_lines))
+
+    def _update_token_source(self, token, new_source):
+        """Tooltip callback — user picked a new source from the dropdown.
+        Updates symbol_info immediately so the next hover reflects the change,
+        then persists in a background thread (file I/O can be slow if Excel
+        is open in another app)."""
+        token = (token or "").strip()
+        new_source = (new_source or "").strip()
+        if not token or token not in self.symbol_info:
+            return
+        self.symbol_info[token]["source"] = new_source
+        self.status_var.set(f"Source mise à jour : {token} → {new_source}")
+        threading.Thread(
+            target=self._persist_token_source,
+            args=(token, new_source),
+            daemon=True,
+        ).start()
+
+    def _persist_token_source(self, token, new_source):
+        """Background-thread: rewrite the row in the symbols sheet, preserving
+        all other metadata columns by reading them from self.symbol_info first."""
+        info = self.symbol_info.get(token, {}) or {}
+        row = {
+            "Symbols": token,
+            "Company Name": info.get("company_name", "") or "",
+            "Yahoo Finance URL": info.get("yf_url", "") or "",
+            "Source": new_source,
+            "Source URL": info.get("source_url", "") or "",
+            "Watchlist URL": info.get("watchlist_url", "") or "",
+            "Watchlist Name": info.get("watchlist_name", "") or "",
+        }
+        try:
+            self._merge_into_symbols_sheet([row])
+            # Mod 2b: persist Investing.com composites so they show up directly
+            # in future dropdowns (combobox + tooltip menu).
+            if new_source.startswith(f"{INVESTING_PREFIX} - "):
+                self.root.after(0, self._register_new_source, new_source)
+        except Exception as e:
+            self.root.after(
+                0,
+                lambda err=e: messagebox.showerror(
+                    "Update Source",
+                    f"Erreur lors de la mise à jour de la source pour {token} : {err}",
+                ),
+            )
+
+    def _reload_symbol_info(self):
+        """Re-read the symbols sheet to refresh tooltip metadata without disturbing
+        timeframe Treeviews or any active filter."""
+        self.symbol_info.clear()
+        if not os.path.exists(EXCEL_FILE):
+            return
+        try:
+            sym_df = pd.read_excel(EXCEL_FILE, sheet_name=SYMBOLS_SHEET)
+        except Exception:
+            return
+        for _, row in sym_df.iterrows():
+            token = _safe_str(row.get("Symbols"))
+            if token:
+                self.symbol_info[token] = {
+                    "company_name": _safe_str(row.get("Company Name")),
+                    "yf_url": _safe_str(row.get("Yahoo Finance URL")),
+                    "source": _safe_str(row.get("Source")),
+                    "source_url": _safe_str(row.get("Source URL")),
+                    "watchlist_url": _safe_str(row.get("Watchlist URL")),
+                    "watchlist_name": _safe_str(row.get("Watchlist Name")),
+                }
 
     def load_data(self):
         """Load data exclusively from Excel file."""
@@ -542,20 +1233,26 @@ class TradingApp:
                 self.status_var.set(f"{EXCEL_FILE} not found.")
                 # self.data is already initialized with empty structured DataFrames
 
-            # Load symbol metadata for tooltips
+            # Load symbol metadata for tooltips (incl. Source URL + Watchlist URL/Name)
             self.symbol_info.clear()
             try:
-                sym_df = pd.read_excel(EXCEL_FILE, sheet_name="symbols")
+                sym_df = pd.read_excel(EXCEL_FILE, sheet_name=SYMBOLS_SHEET)
                 for _, row in sym_df.iterrows():
-                    token = str(row.get("Symbols", "") or "").strip()
+                    token = _safe_str(row.get("Symbols"))
                     if token:
                         self.symbol_info[token] = {
-                            "company_name": str(row.get("Company Name", "") or "").strip(),
-                            "yf_url": str(row.get("Yahoo Finance URL", "") or "").strip(),
-                            "source": str(row.get("Source", "") or "").strip(),
+                            "company_name": _safe_str(row.get("Company Name")),
+                            "yf_url": _safe_str(row.get("Yahoo Finance URL")),
+                            "source": _safe_str(row.get("Source")),
+                            "source_url": _safe_str(row.get("Source URL")),
+                            "watchlist_url": _safe_str(row.get("Watchlist URL")),
+                            "watchlist_name": _safe_str(row.get("Watchlist Name")),
                         }
             except Exception:
                 pass
+
+            # Load (or create) the sources sheet driving the Add Tokens dropdown
+            self._refresh_available_sources()
 
             self.display_all_data() # Helper to refresh all tabs
             self.status_var.set("Data loaded successfully")
@@ -704,10 +1401,12 @@ class TradingApp:
                                         df_save[c] = pd.to_numeric(df_save[c], errors='coerce')
                                 df_save.to_excel(writer, sheet_name=sheet_name, index=False)
                         for sn, df_pres in preserve.items():
-                            if sn == "symbols":
-                                for col in ["Company Name", "Yahoo Finance URL", "Source"]:
+                            if sn == SYMBOLS_SHEET:
+                                for col in ["Company Name", "Yahoo Finance URL", "Source", "Source URL"]:
                                     if col not in df_pres.columns:
                                         df_pres[col] = ""
+                                # Reorder to canonical column order
+                                df_pres = df_pres.reindex(columns=SYMBOLS_COLS)
                             df_pres.to_excel(writer, sheet_name=sn, index=False)
                     shutil.move(temp_path, EXCEL_FILE)
                 finally:
@@ -720,6 +1419,81 @@ class TradingApp:
         except Exception as e:
             messagebox.showerror("Save Error", f"Error: {e}")
             self.status_var.set("Save failed")
+
+    def _refresh_available_sources(self):
+        """Read the `sources` sheet from xlsx; bootstrap it with DEFAULT_SOURCES if absent.
+        Updates self.available_sources and refreshes the Add Tokens combobox values if built."""
+        sources = None
+        if os.path.exists(EXCEL_FILE):
+            try:
+                xl = pd.ExcelFile(EXCEL_FILE)
+                if SOURCES_SHEET in xl.sheet_names:
+                    src_df = pd.read_excel(xl, SOURCES_SHEET)
+                    if not src_df.empty:
+                        sources = [
+                            str(s).strip()
+                            for s in src_df.iloc[:, 0].dropna().tolist()
+                            if str(s).strip()
+                        ]
+            except Exception as e:
+                print(f"[sources] read warning: {e}")
+
+        if not sources:
+            sources = list(DEFAULT_SOURCES)
+            if os.path.exists(EXCEL_FILE):
+                try:
+                    self._write_sources_sheet(sources)
+                except Exception as e:
+                    print(f"[sources] could not initialize sources sheet: {e}")
+
+        # Defensive: drop any accidental sentinel writes
+        sources = [s for s in sources if s != NEW_SOURCE_SENTINEL]
+        self.available_sources = sources
+        cb = getattr(self, 'source_combobox', None)
+        if cb is not None:
+            cb['values'] = list(sources) + [NEW_SOURCE_SENTINEL]
+
+    def _register_new_source(self, name):
+        """Append `name` to the sources sheet if not already present, refresh
+        self.available_sources and the Add Tokens combobox values. Idempotent:
+        no-op if name is empty, the sentinel, or already known."""
+        name = (name or "").strip()
+        if not name or name == NEW_SOURCE_SENTINEL or name in self.available_sources:
+            return
+        self.available_sources.append(name)
+        try:
+            self._write_sources_sheet(self.available_sources)
+        except Exception as e:
+            print(f"[sources] register write warning: {e}")
+        cb = getattr(self, 'source_combobox', None)
+        if cb is not None:
+            cb['values'] = list(self.available_sources) + [NEW_SOURCE_SENTINEL]
+
+    def _write_sources_sheet(self, sources):
+        """Persist a `sources` sheet to xlsx, preserving every other sheet verbatim.
+        Used on first launch when the sheet does not yet exist."""
+        with DATA_LOCK:
+            existing = {}
+            try:
+                xl = pd.ExcelFile(EXCEL_FILE)
+                for sn in xl.sheet_names:
+                    existing[sn] = pd.read_excel(xl, sn)
+            except Exception as e:
+                print(f"[sources] preserve read warning: {e}")
+            existing[SOURCES_SHEET] = pd.DataFrame({"Source Name": sources})
+            temp_fd, temp_path = tempfile.mkstemp(suffix='.xlsx', prefix='tmp_sources_')
+            os.close(temp_fd)
+            try:
+                with pd.ExcelWriter(temp_path, engine='openpyxl') as writer:
+                    for sn, df in existing.items():
+                        df.to_excel(writer, sheet_name=sn, index=False)
+                shutil.move(temp_path, EXCEL_FILE)
+            finally:
+                if os.path.exists(temp_path):
+                    try:
+                        os.remove(temp_path)
+                    except OSError:
+                        pass
 
     def update_data(self):
         """Update data by running the trading signal generator and reloading from Excel."""

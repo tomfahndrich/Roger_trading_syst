@@ -26,12 +26,98 @@ import pandas as pd
 import yfinance as yf
 
 
-TICKER_LIKE_RE = re.compile(r"^[A-Z0-9.\-^=]{1,15}$")  # rough heuristic
+TICKER_LIKE_RE = re.compile(r"^[A-Z0-9.\-^=:]{1,25}$")  # rough heuristic; ':' allows EXCHANGE:SYMBOL form
 
 
 def looks_like_ticker(s: str) -> bool:
     s = (s or "").strip()
     return bool(s) and bool(TICKER_LIKE_RE.match(s)) and s.upper() == s
+
+
+# Mapping from common exchange prefixes (TradingView-style EXCHANGE:SYMBOL)
+# to the suffix Yahoo Finance expects (e.g. ".DE" for Xetra, "" for US).
+# Empty string = US listing, no suffix needed. Unknown prefixes fall back
+# to the raw symbol (see to_yf_symbol below).
+EXCHANGE_TO_YF_SUFFIX: Dict[str, str] = {
+    # United States
+    "NYSE": "", "NASDAQ": "", "NSDQ": "", "AMEX": "", "BATS": "",
+    "ARCA": "", "OTC": "", "OTCMKTS": "", "CBOE": "", "PINK": "",
+    # Germany
+    "XTRA": ".DE", "XETR": ".DE", "ETR": ".DE", "FWB": ".F", "FRA": ".F",
+    "GETTEX": ".DE", "TRADEGATE": ".DE",
+    # United Kingdom
+    "LSE": ".L", "LON": ".L", "AIM": ".L",
+    # Canada
+    "TSX": ".TO", "TSXV": ".V", "CSE": ".CN", "NEO": ".NE",
+    # Australia / New Zealand
+    "ASX": ".AX", "NZX": ".NZ",
+    # Asia / Pacific
+    "HKEX": ".HK", "SEHK": ".HK",
+    "TYO": ".T", "TSE": ".T", "JPX": ".T",
+    "KRX": ".KS", "KOSDAQ": ".KQ",
+    "TPE": ".TW", "TWSE": ".TW", "TWO": ".TWO",
+    "SGX": ".SI",
+    "SSE": ".SS", "SHA": ".SS", "SZSE": ".SZ", "SHE": ".SZ",
+    "BSE": ".BO", "NSE": ".NS",
+    # Continental Europe
+    "EPA": ".PA", "PAR": ".PA", "EURONEXT": ".PA",
+    "AMS": ".AS",
+    "BIT": ".MI", "MIL": ".MI", "MIB": ".MI",
+    "BME": ".MC", "MAD": ".MC",
+    "SIX": ".SW", "SWX": ".SW", "EBS": ".SW",
+    "VIE": ".VI",
+    "WSE": ".WA", "GPW": ".WA",
+    "OMX": ".ST", "OMXSTO": ".ST", "STO": ".ST",
+    "OMXCOP": ".CO", "CPH": ".CO",
+    "OMXHEX": ".HE", "HEL": ".HE",
+    "OSL": ".OL", "OBX": ".OL",
+    "BRU": ".BR",
+    "LIS": ".LS", "ELI": ".LS",
+    # Latin America
+    "BMFBOVESPA": ".SA", "BVMF": ".SA", "B3": ".SA", "BOVESPA": ".SA",
+    "BMV": ".MX", "BIVA": ".MX",
+    "BCBA": ".BA", "BYMA": ".BA",
+    "BCS": ".SN",  # Santiago, Chile
+    # Africa / Middle East
+    "JSE": ".JO",  # Johannesburg
+    "TADAWUL": ".SR", "SAUDI": ".SR",  # Saudi Arabia
+    "TASE": ".TA",  # Tel Aviv
+    "EGX": ".CA",  # Egypt
+}
+
+
+def parse_exchange_token(raw: str) -> Tuple[Optional[str], str]:
+    """Split 'EXCHANGE:SYMBOL' into (exchange_upper, symbol).
+    Returns (None, raw_stripped) if there is no ':' separator."""
+    s = (raw or "").strip()
+    if ":" not in s:
+        return None, s
+    exchange, _, symbol = s.partition(":")
+    exchange = exchange.strip().upper()
+    symbol = symbol.strip()
+    if not exchange or not symbol:
+        # Malformed — drop the lone colon and treat the rest as a bare symbol
+        return None, s.replace(":", "").strip()
+    return exchange, symbol
+
+
+def to_yf_symbol(raw: str) -> str:
+    """Resolve a raw input to its Yahoo Finance ticker.
+
+    Examples:
+        'XTRA:MUV2'  -> 'MUV2.DE'   (known prefix, suffix appended)
+        'NYSE:WES'   -> 'WES'       (US exchange, empty suffix)
+        'FOO:BAR'    -> 'BAR'       (unknown prefix, fallback to bare symbol)
+        'AAPL'       -> 'AAPL'      (no prefix, idempotent)
+        'MUV2.DE'    -> 'MUV2.DE'   (already resolved, idempotent)
+    """
+    exchange, symbol = parse_exchange_token(raw)
+    if exchange is None:
+        return symbol
+    suffix = EXCHANGE_TO_YF_SUFFIX.get(exchange)
+    if suffix is None:
+        return symbol  # unknown prefix → try bare symbol as US fallback
+    return f"{symbol}{suffix}" if suffix else symbol
 
 
 def normalize_text(s: str) -> str:
@@ -123,13 +209,18 @@ def lookup_info_for_symbol(symbol: str) -> Tuple[Optional[str], str]:
     """
     Returns (company_name, debug_info) for a given ticker symbol.
     Uses yf.Ticker(symbol).info to resolve longName / shortName.
+
+    Inputs of the form 'EXCHANGE:SYMBOL' (TradingView style) are resolved
+    via to_yf_symbol() before the yfinance call — e.g. 'XTRA:MUV2' is
+    queried as 'MUV2.DE'. Bare symbols pass through unchanged.
     """
     symbol = (symbol or "").strip()
     if not symbol:
         return None, "empty_symbol"
 
+    resolved = to_yf_symbol(symbol)
     try:
-        info = yf.Ticker(symbol).info
+        info = yf.Ticker(resolved).info
     except Exception as e:
         return None, f"info_error:{type(e).__name__}"
 
@@ -139,6 +230,116 @@ def lookup_info_for_symbol(symbol: str) -> Tuple[Optional[str], str]:
     name = info.get("longName") or info.get("shortName") or None
     qtype = info.get("quoteType", "UNKNOWN")
     return name, f"info_ok:{qtype}"
+
+
+def _score_symbol_match(target: str, candidate_symbol: str) -> int:
+    """Rank a yfinance Search candidate against the bare target symbol.
+    Higher = better. 0 means 'reject — no meaningful match'.
+
+        sym == target           → 100   (e.g. AAPL == AAPL)
+        sym startswith target+. → 90    (e.g. USIM5.SA when target=USIM5)
+        target startswith sym+. → 60    (uncommon, opposite direction)
+        target in sym           → 30    (e.g. RDS-A.L contains RDS, weak)
+        else                    → 0
+    """
+    t = (target or "").strip().upper()
+    s = (candidate_symbol or "").strip().upper()
+    if not t or not s:
+        return 0
+    if s == t:
+        return 100
+    if s.startswith(t + "."):
+        return 90
+    if t.startswith(s + "."):
+        return 60
+    if t in s:
+        return 30
+    return 0
+
+
+def _search_yahoo_for_symbol(bare_symbol: str, max_results: int = 10,
+                             timeout: int = 30) -> Tuple[Optional[str], Optional[str], str]:
+    """Fallback when direct yfinance lookup misses: query yf.Search and pick the
+    best candidate whose Yahoo symbol matches `bare_symbol` (exact, then
+    `bare_symbol.<suffix>`, then weaker overlaps). EQUITY is preferred.
+
+    Returns (yf_symbol, company_name, debug). Either field may be None.
+    """
+    bare = (bare_symbol or "").strip()
+    if not bare:
+        return None, None, "empty"
+    try:
+        res = yf.Search(bare, max_results=max_results, timeout=timeout).quotes
+    except Exception as e:
+        return None, None, f"search_error:{type(e).__name__}"
+    if not res:
+        return None, None, "no_results"
+
+    candidates = []
+    for q in res:
+        sym = (q.get("symbol") or "").strip()
+        if not sym:
+            continue
+        score = _score_symbol_match(bare, sym)
+        if score == 0:
+            continue
+        if (q.get("quoteType") or "").upper() == "EQUITY":
+            score += 5  # tiebreak in favour of common stock
+        candidates.append((score, q))
+
+    if not candidates:
+        return None, None, "no_symbol_match"
+    candidates.sort(key=lambda x: -x[0])
+    best = candidates[0][1]
+    name = best.get("longname") or best.get("shortname") or None
+    return ((best.get("symbol") or "").strip() or None), name, f"search:{best.get('symbol')}"
+
+
+def resolve_and_lookup(raw: str) -> Tuple[Optional[str], Optional[str], str]:
+    """One-shot: resolve a raw user input (EXCHANGE:SYMBOL, bare ticker, etc.)
+    to its canonical Yahoo Finance ticker AND fetch its company name.
+
+    Flow:
+        1) to_yf_symbol(raw) → resolved (e.g. 'BOVESPA:USIM5' → 'USIM5.SA')
+        2) yf.Ticker(resolved).info → if a name is found, return (resolved, name)
+        3) fallback: yf.Search(<bare symbol>) → pick the best candidate whose
+           Yahoo symbol matches the bare ticker (e.g. 'USIM5' → 'USIM5.SA' even
+           when the prefix is unknown or unmapped)
+
+    Returns (yf_symbol, company_name, debug_info). yf_symbol may differ from
+    to_yf_symbol(raw) if the fallback search found a better match. Both fields
+    may be None if nothing matches.
+    """
+    raw = (raw or "").strip()
+    if not raw:
+        return None, None, "empty_input"
+
+    resolved = to_yf_symbol(raw)
+    # 1) Try the direct ticker lookup
+    try:
+        info = yf.Ticker(resolved).info
+    except Exception as e:
+        info = None
+        direct_err = type(e).__name__
+    else:
+        direct_err = None
+
+    if info:
+        name = info.get("longName") or info.get("shortName") or None
+        if name:
+            qtype = info.get("quoteType", "UNKNOWN")
+            return resolved, name, f"direct:{qtype}"
+
+    # 2) Fallback: search by the bare symbol (after stripping any EXCHANGE: prefix)
+    _, bare = parse_exchange_token(raw)
+    if not bare:
+        bare = resolved
+    found_sym, found_name, dbg = _search_yahoo_for_symbol(bare)
+    if found_sym and found_name:
+        prefix = f"direct_miss({direct_err or 'no_info'})|{dbg}"
+        return found_sym, found_name, prefix
+
+    return None, None, f"no_match({direct_err or 'no_info'}|{dbg})"
 
 
 def main() -> int:

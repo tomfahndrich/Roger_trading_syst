@@ -174,3 +174,306 @@ class TestMainModeRouting:
             df = self._run_main_with_temp_excel(["AAPL"], ["--mode", "symbol", "--source", "manual"])
 
         assert df.iloc[0]["Source"] == "manual"
+
+
+# ── parse_exchange_token ──────────────────────────────────────────────────────
+
+class TestParseExchangeToken:
+
+    def test_no_colon_returns_none_and_full_string(self):
+        assert sf.parse_exchange_token("AAPL") == (None, "AAPL")
+        assert sf.parse_exchange_token("MUV2.DE") == (None, "MUV2.DE")
+
+    def test_known_exchange_uppercased(self):
+        assert sf.parse_exchange_token("xtra:MUV2") == ("XTRA", "MUV2")
+        assert sf.parse_exchange_token("NYSE:WES") == ("NYSE", "WES")
+
+    def test_strips_whitespace_around_parts(self):
+        assert sf.parse_exchange_token("  XTRA : MUV2  ") == ("XTRA", "MUV2")
+
+    def test_empty_or_lone_colon_falls_back_to_bare_string(self):
+        assert sf.parse_exchange_token("") == (None, "")
+        assert sf.parse_exchange_token(None) == (None, "")
+        assert sf.parse_exchange_token(":") == (None, "")
+        assert sf.parse_exchange_token("XTRA:") == (None, "XTRA")
+        assert sf.parse_exchange_token(":MUV2") == (None, "MUV2")
+
+
+# ── to_yf_symbol ──────────────────────────────────────────────────────────────
+
+class TestToYfSymbol:
+
+    def test_xetra_prefix_appends_de_suffix(self):
+        assert sf.to_yf_symbol("XTRA:MUV2") == "MUV2.DE"
+        assert sf.to_yf_symbol("XTRA:SHLG") == "SHLG.DE"
+        assert sf.to_yf_symbol("xetr:bmw") == "bmw.DE"  # case-insensitive prefix
+
+    def test_us_exchange_strips_prefix_no_suffix(self):
+        assert sf.to_yf_symbol("NYSE:WES") == "WES"
+        assert sf.to_yf_symbol("NASDAQ:AAPL") == "AAPL"
+        assert sf.to_yf_symbol("AMEX:GLD") == "GLD"
+
+    def test_european_suffixes(self):
+        assert sf.to_yf_symbol("LSE:SHEL") == "SHEL.L"
+        assert sf.to_yf_symbol("EPA:LVMH") == "LVMH.PA"
+        assert sf.to_yf_symbol("SIX:NESN") == "NESN.SW"
+        assert sf.to_yf_symbol("BIT:ENI") == "ENI.MI"
+        assert sf.to_yf_symbol("AMS:ASML") == "ASML.AS"
+
+    def test_asia_pacific_suffixes(self):
+        assert sf.to_yf_symbol("HKEX:0700") == "0700.HK"
+        assert sf.to_yf_symbol("TYO:7203") == "7203.T"
+        assert sf.to_yf_symbol("ASX:BHP") == "BHP.AX"
+
+    def test_unknown_prefix_falls_back_to_bare_symbol(self):
+        # FOO is not in the EXCHANGE_TO_YF_SUFFIX map → return bare symbol
+        assert sf.to_yf_symbol("FOO:BAR") == "BAR"
+        assert sf.to_yf_symbol("MADEUP:XYZ") == "XYZ"
+
+    def test_no_prefix_passes_through(self):
+        assert sf.to_yf_symbol("AAPL") == "AAPL"
+        assert sf.to_yf_symbol("MUV2.DE") == "MUV2.DE"  # already resolved
+        assert sf.to_yf_symbol("BRK-B") == "BRK-B"
+
+    def test_idempotent_on_resolved_input(self):
+        # Applying twice returns the same result
+        for raw in ("XTRA:MUV2", "NYSE:WES", "AAPL", "FOO:BAR"):
+            once = sf.to_yf_symbol(raw)
+            twice = sf.to_yf_symbol(once)
+            assert once == twice, f"not idempotent for {raw!r}: {once!r} -> {twice!r}"
+
+    def test_empty_inputs(self):
+        assert sf.to_yf_symbol("") == ""
+        assert sf.to_yf_symbol(None) == ""
+
+
+# ── lookup_info_for_symbol resolves EXCHANGE:SYMBOL before yfinance ──────────
+
+class TestLookupResolvesExchangePrefix:
+
+    def test_xtra_prefix_queries_yfinance_with_de_suffix(self):
+        captured = {}
+
+        def fake_ticker(arg):
+            captured["arg"] = arg
+            mock = MagicMock()
+            mock.info = {"longName": "Münchener Rückversicherungs-Gesellschaft AG",
+                         "quoteType": "EQUITY"}
+            return mock
+
+        with patch("symbols_finder.yf.Ticker", side_effect=fake_ticker):
+            name, dbg = sf.lookup_info_for_symbol("XTRA:MUV2")
+
+        assert captured["arg"] == "MUV2.DE", "yfinance.Ticker should receive the resolved Yahoo symbol"
+        assert name == "Münchener Rückversicherungs-Gesellschaft AG"
+        assert "info_ok" in dbg
+
+    def test_nyse_prefix_queries_yfinance_with_bare_symbol(self):
+        captured = {}
+
+        def fake_ticker(arg):
+            captured["arg"] = arg
+            mock = MagicMock()
+            mock.info = {"longName": "Western Midstream Partners",
+                         "quoteType": "EQUITY"}
+            return mock
+
+        with patch("symbols_finder.yf.Ticker", side_effect=fake_ticker):
+            name, _ = sf.lookup_info_for_symbol("NYSE:WES")
+
+        assert captured["arg"] == "WES"
+        assert name == "Western Midstream Partners"
+
+    def test_unknown_prefix_queries_yfinance_with_bare_symbol(self):
+        captured = {}
+
+        def fake_ticker(arg):
+            captured["arg"] = arg
+            mock = MagicMock()
+            mock.info = {}  # nothing found
+            return mock
+
+        with patch("symbols_finder.yf.Ticker", side_effect=fake_ticker):
+            name, _ = sf.lookup_info_for_symbol("FOO:BAR")
+
+        assert captured["arg"] == "BAR", "Unknown prefix should fall back to bare symbol"
+        assert name is None
+
+    def test_bare_symbol_queries_yfinance_unchanged(self):
+        captured = {}
+
+        def fake_ticker(arg):
+            captured["arg"] = arg
+            mock = MagicMock()
+            mock.info = {"longName": "Apple Inc.", "quoteType": "EQUITY"}
+            return mock
+
+        with patch("symbols_finder.yf.Ticker", side_effect=fake_ticker):
+            sf.lookup_info_for_symbol("AAPL")
+
+        assert captured["arg"] == "AAPL"
+
+
+# ── Brazilian exchange aliases (BOVESPA + B3 family map to .SA) ──────────────
+
+class TestBovespaAlias:
+    def test_bovespa_prefix_appends_sa_suffix(self):
+        assert sf.to_yf_symbol("BOVESPA:USIM5") == "USIM5.SA"
+
+    def test_other_brazilian_aliases_still_work(self):
+        assert sf.to_yf_symbol("BMFBOVESPA:PETR4") == "PETR4.SA"
+        assert sf.to_yf_symbol("BVMF:VALE3") == "VALE3.SA"
+        assert sf.to_yf_symbol("B3:ITUB4") == "ITUB4.SA"
+
+    def test_johannesburg_and_saudi_aliases(self):
+        assert sf.to_yf_symbol("JSE:NPN") == "NPN.JO"
+        assert sf.to_yf_symbol("TADAWUL:2222") == "2222.SR"
+        assert sf.to_yf_symbol("TASE:TEVA") == "TEVA.TA"
+
+
+# ── _score_symbol_match (pure ranking helper) ────────────────────────────────
+
+class TestScoreSymbolMatch:
+    def test_exact_match_scores_highest(self):
+        assert sf._score_symbol_match("AAPL", "AAPL") == 100
+
+    def test_target_dot_suffix_scores_high(self):
+        # Yahoo symbol carries the suffix, target is the bare form
+        assert sf._score_symbol_match("USIM5", "USIM5.SA") == 90
+        assert sf._score_symbol_match("MUV2", "MUV2.DE") == 90
+
+    def test_target_with_suffix_against_bare(self):
+        assert sf._score_symbol_match("MUV2.DE", "MUV2") == 60
+
+    def test_partial_contains_scores_weak(self):
+        assert sf._score_symbol_match("USIM", "USIM5.SA") == 30
+
+    def test_unrelated_returns_zero(self):
+        assert sf._score_symbol_match("FOO", "BAR.XX") == 0
+
+    def test_case_insensitive(self):
+        assert sf._score_symbol_match("usim5", "USIM5.SA") == 90
+
+    def test_empty_inputs_return_zero(self):
+        assert sf._score_symbol_match("", "AAPL") == 0
+        assert sf._score_symbol_match("AAPL", "") == 0
+
+
+# ── _search_yahoo_for_symbol (mocked yf.Search fallback) ─────────────────────
+
+class TestSearchYahooForSymbol:
+    def test_picks_dot_suffix_match_over_partial(self):
+        """yf.Search returns multiple results; picker prefers USIM5.SA over weaker matches."""
+        with patch("symbols_finder.yf.Search") as mock_cls:
+            mock_cls.return_value.quotes = [
+                {"symbol": "USIMA",     "shortname": "Random Co",       "quoteType": "EQUITY"},
+                {"symbol": "USIM5.SA",  "longname": "Usiminas",         "quoteType": "EQUITY"},
+                {"symbol": "USIM5BVMF", "shortname": "Other listing",    "quoteType": "EQUITY"},
+            ]
+            sym, name, dbg = sf._search_yahoo_for_symbol("USIM5")
+
+        assert sym == "USIM5.SA"
+        assert name == "Usiminas"
+        assert dbg.startswith("search:")
+
+    def test_no_results_returns_none(self):
+        with patch("symbols_finder.yf.Search") as mock_cls:
+            mock_cls.return_value.quotes = []
+            sym, name, dbg = sf._search_yahoo_for_symbol("ZZZNONE")
+        assert sym is None
+        assert name is None
+        assert dbg == "no_results"
+
+    def test_no_matching_symbol_returns_none(self):
+        """All search results are unrelated → returns no_symbol_match."""
+        with patch("symbols_finder.yf.Search") as mock_cls:
+            mock_cls.return_value.quotes = [
+                {"symbol": "UNRELATED1", "shortname": "X", "quoteType": "EQUITY"},
+                {"symbol": "UNRELATED2", "shortname": "Y", "quoteType": "ETF"},
+            ]
+            sym, name, dbg = sf._search_yahoo_for_symbol("USIM5")
+        assert sym is None
+        assert name is None
+        assert dbg == "no_symbol_match"
+
+    def test_equity_preferred_on_tie(self):
+        """Two candidates both starting with target+.; EQUITY wins over ETF."""
+        with patch("symbols_finder.yf.Search") as mock_cls:
+            mock_cls.return_value.quotes = [
+                {"symbol": "USIM5.OT", "shortname": "Other ETF", "quoteType": "ETF"},
+                {"symbol": "USIM5.SA", "shortname": "Usiminas",  "quoteType": "EQUITY"},
+            ]
+            sym, _, _ = sf._search_yahoo_for_symbol("USIM5")
+        assert sym == "USIM5.SA"
+
+    def test_search_exception_returns_none(self):
+        with patch("symbols_finder.yf.Search", side_effect=ConnectionError("net down")):
+            sym, name, dbg = sf._search_yahoo_for_symbol("USIM5")
+        assert sym is None
+        assert dbg.startswith("search_error:")
+
+
+# ── resolve_and_lookup (combined direct + fallback flow) ─────────────────────
+
+class TestResolveAndLookup:
+    def test_direct_lookup_succeeds_no_search_called(self):
+        """When Ticker.info returns a name, yf.Search must NOT be called."""
+        with patch("symbols_finder.yf.Ticker") as mock_t, \
+             patch("symbols_finder.yf.Search") as mock_s:
+            mock_t.return_value.info = {"longName": "Apple Inc.", "quoteType": "EQUITY"}
+            sym, name, dbg = sf.resolve_and_lookup("AAPL")
+
+        assert sym == "AAPL"
+        assert name == "Apple Inc."
+        assert dbg == "direct:EQUITY"
+        mock_s.assert_not_called()
+
+    def test_bovespa_resolves_via_map_then_direct_lookup(self):
+        """BOVESPA:USIM5 → USIM5.SA via to_yf_symbol → Ticker.info finds it.
+        No fallback search needed."""
+        captured = {}
+        def fake_ticker(arg):
+            captured["arg"] = arg
+            mock = MagicMock()
+            mock.info = {"longName": "Usinas Siderúrgicas", "quoteType": "EQUITY"}
+            return mock
+        with patch("symbols_finder.yf.Ticker", side_effect=fake_ticker), \
+             patch("symbols_finder.yf.Search") as mock_s:
+            sym, name, dbg = sf.resolve_and_lookup("BOVESPA:USIM5")
+
+        assert captured["arg"] == "USIM5.SA"
+        assert sym == "USIM5.SA"
+        assert name == "Usinas Siderúrgicas"
+        mock_s.assert_not_called()
+
+    def test_direct_miss_triggers_search_fallback_and_returns_found_symbol(self):
+        """When Ticker.info returns nothing for the resolved symbol, the
+        function falls back to yf.Search on the bare ticker and returns the
+        symbol the search actually found (which may differ from the resolved one)."""
+        with patch("symbols_finder.yf.Ticker") as mock_t, \
+             patch("symbols_finder.yf.Search") as mock_s:
+            mock_t.return_value.info = {}  # direct lookup misses
+            mock_s.return_value.quotes = [
+                {"symbol": "USIM5.SA", "longname": "Usiminas", "quoteType": "EQUITY"},
+            ]
+            sym, name, dbg = sf.resolve_and_lookup("FOOEXCHG:USIM5")
+
+        # to_yf_symbol returns 'USIM5' for unknown prefix → direct miss → search → USIM5.SA
+        assert sym == "USIM5.SA"
+        assert name == "Usiminas"
+        assert "direct_miss" in dbg and "search:" in dbg
+
+    def test_direct_miss_and_search_miss_returns_none(self):
+        with patch("symbols_finder.yf.Ticker") as mock_t, \
+             patch("symbols_finder.yf.Search") as mock_s:
+            mock_t.return_value.info = {}
+            mock_s.return_value.quotes = []
+            sym, name, dbg = sf.resolve_and_lookup("FOO:NONEXIST")
+
+        assert sym is None
+        assert name is None
+        assert dbg.startswith("no_match(")
+
+    def test_empty_input(self):
+        sym, name, dbg = sf.resolve_and_lookup("")
+        assert (sym, name, dbg) == (None, None, "empty_input")
