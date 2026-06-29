@@ -19,8 +19,17 @@ git checkout -B Roger2 origin/Roger2
 
 echo Repo synced to origin/Roger2.
 
+REM Ensure every Python dependency listed in requirements.txt is installed.
+REM pip is idempotent: already-installed packages are confirmed in seconds,
+REM only missing ones are downloaded. Requires Python 3 with bundled pip.
+echo Checking Python dependencies...
+python -m pip install -r requirements.txt --quiet --disable-pip-version-check
+if errorlevel 1 (
+    echo WARNING: pip install reported an error. The app may not start correctly.
+    echo Check your internet connection and that Python 3 is on the PATH.
+)
+
 echo Attempting to launch Roger Trading System GUI...
-echo Please ensure Python 3 is installed and all required packages (pandas, yfinance, ta, openpyxl, etc.) are available.
 echo If the app doesn't start, this window might show error messages.
 
 REM Execute the Python GUI script.
